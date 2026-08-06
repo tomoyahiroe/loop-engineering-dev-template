@@ -8,6 +8,14 @@ LOOP_DIR="${LOOP_DIR:-$(cd "$LIB_DIR/.." && pwd)}"
 REPO_ROOT="${REPO_ROOT:-$(cd "$LIB_DIR/../.." && pwd)}"
 export LOOP_DIR REPO_ROOT
 
+# bash 5.2+ は既定で patsub_replacement が有効で、${var/pat/repl} の repl 中の
+# & をマッチした文字列（sed の & と同じ意味）として展開してしまう。
+# render_prompt が値に & を含むケース（例: "cd a && b"）を壊さないよう、
+# source された時点で一度だけ無効化する（shopt はプロセス全体に効き、関数に
+# スコープされないため、render_prompt 内ではなくここで固定する）。
+# bash 3.2 にはこのオプション自体が無いのでエラーを握りつぶす
+shopt -u patsub_replacement 2>/dev/null || true
+
 # 設定値を 1 つ取り出す。未定義なら終了コード 1
 cfg() {
   LOOP_DIR="$LOOP_DIR" "$LIB_DIR/../bin/loop-config" get "$1"
@@ -33,11 +41,6 @@ retry_delay() {
 render_prompt() {
   local tpl="$1"; shift
   local out pair k v
-  # bash 5.2+ は既定で patsub_replacement が有効で、置換文字列中の & を
-  # マッチした文字列（sed の & と同じ意味）として展開してしまう。
-  # 値に & が含まれるケース（例: "cd a && b"）を壊さないよう無効化する。
-  # bash 3.2 にはこのオプション自体が無いのでエラーを握りつぶす
-  shopt -u patsub_replacement 2>/dev/null || true
   out="$(cat "$tpl")"
   for pair in "$@"; do
     k="${pair%%=*}"
