@@ -123,6 +123,17 @@ EOF
   run tail -5 "$REPO_ROOT/loops/STATE.md"
   [[ "$output" == *"一過性エラー"* ]]
   [[ "$output" == *"リトライ"* ]]
+
+  # fix round 1: リトライは同じログファイルを上書きしない。1 回目の失敗理由
+  # （ETIMEDOUT）は元のログに残り、2 回目（成功）は別名の .retry.md に残るはず
+  ORIG_LOG="$REPO_ROOT/loops/runs/$(date +%Y-%m-%d)-maker-issue-7.md"
+  RETRY_LOG="$REPO_ROOT/loops/runs/$(date +%Y-%m-%d)-maker-issue-7.retry.md"
+  [ -f "$ORIG_LOG" ]
+  [ -f "$RETRY_LOG" ]
+  run cat "$ORIG_LOG"
+  [[ "$output" == *"ETIMEDOUT"* ]]
+  run cat "$RETRY_LOG"
+  [[ "$output" == *"retry succeeded"* ]]
 }
 
 @test "2 回連続で実行しても 2 つ目の worktree は作られない（冪等性の副作用チェック）" {
@@ -135,4 +146,82 @@ EOF
   # 直接的な証拠にする
   COUNT="$(printf '%s\n' "$output" | grep -c '^worktree ')"
   [ "$COUNT" -eq 2 ]
+}
+
+# --- ここから fix round 1（レビュー指摘への対応） ---------------------------
+
+@test "予算を使い切っていても既に in-flight なら SKIPPED で 0 を返す（冪等性が budget-check より優先）" {
+  # 1 回目は通常どおり worktree/branch を作る（ccusage は ok のまま）
+  "$LOOP_REAL_DIR/bin/dispatch-maker" 7
+  # 2 回目は予算を使い切った状態にしてから叩く。in-flight チェックが
+  # budget-check より先に効けば、予算超過でも exit 1「SKIP: 予算ゲート」ではなく
+  # exit 0「SKIPPED」になるはず
+  use_ccusage_stub over
+  run "$LOOP_REAL_DIR/bin/dispatch-maker" 7
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SKIP"* ]]
+  [[ "$output" != *"予算ゲート"* ]]
+  run tail -3 "$REPO_ROOT/loops/STATE.md"
+  [[ "$output" == *"SKIPPED"* ]]
+}
+
+@test "branch だけが既にあれば worktree がなくても SKIPPED で 0 を返す" {
+  # クラッシュ後に「branch は作られたが worktree はまだ」という状態を再現する
+  git -C "$REPO_ROOT" branch loop/issue-7
+  run "$LOOP_REAL_DIR/bin/dispatch-maker" 7
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SKIP"* ]]
+  run tail -3 "$REPO_ROOT/loops/STATE.md"
+  [[ "$output" == *"SKIPPED"* ]]
+  [ ! -d "$TMP/repo-issue-7" ]
+}
+
+@test "worktree ディレクトリだけが既にあれば branch がなくても SKIPPED で 0 を返す" {
+  # クラッシュ後に「worktree ディレクトリだけ残って branch 登録は無い」状態を再現する
+  mkdir -p "$TMP/repo-issue-7"
+  run "$LOOP_REAL_DIR/bin/dispatch-maker" 7
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SKIP"* ]]
+  run tail -3 "$REPO_ROOT/loops/STATE.md"
+  [[ "$output" == *"SKIPPED"* ]]
+  run git -C "$REPO_ROOT" show-ref --verify --quiet refs/heads/loop/issue-7
+  [ "$status" -eq 1 ]
+}
+
+@test "エージェントがコミット済みなら一過性エラーでもリトライしない（作業を上書きしない）" {
+  # リトライ条件の中で一番重要なケース: 「途中まで進んだ WIP」を黙って
+  # 2 回目の実行で踏みつぶさないこと。retry-mock.sh と同じ手法で、今度は
+  # 1 回目の呼び出し内で worktree にコミットしてから一過性エラーを起こす
+  # provider スタブをその場で作る
+  printf '[agent]\nprovider = "commit-then-fail"\n\n[project]\ntest = "pnpm -r test"\nlint = "pnpm -r lint"\n\n[retry]\ndelay_seconds = 0\n' \
+    > "$LOOP_DIR/config.toml"
+
+  COUNTER="$TMP/attempt-count"
+  cat > "$LOOP_DIR/agents/commit-then-fail.sh" <<EOF
+#!/usr/bin/env bash
+set -uo pipefail
+COUNT_FILE="$COUNTER"
+N=0
+[ -f "\$COUNT_FILE" ] && N="\$(cat "\$COUNT_FILE")"
+N=\$((N + 1))
+echo "\$N" > "\$COUNT_FILE"
+cd "\$LOOP_CWD"
+echo wip > wip.txt
+git add wip.txt
+git -c user.email=t@example.com -c user.name=t commit -qm "wip: partial work" >/dev/null
+echo "connect ETIMEDOUT 127.0.0.1:443"
+exit 1
+EOF
+  chmod +x "$LOOP_DIR/agents/commit-then-fail.sh"
+
+  run "$LOOP_REAL_DIR/bin/dispatch-maker" 7
+  [ "$status" -eq 1 ]
+  # 1 回しか呼ばれていない（= リトライしていない）ことを直接数える
+  [ "$(cat "$COUNTER")" -eq 1 ]
+  run tail -5 "$REPO_ROOT/loops/STATE.md"
+  [[ "$output" == *"FAILED"* ]]
+  [[ "$output" != *"リトライ"* ]]
+  # worktree のコミットが上書き・破棄されずに残っている
+  run git -C "$TMP/repo-issue-7" log --oneline -1
+  [[ "$output" == *"wip: partial work"* ]]
 }

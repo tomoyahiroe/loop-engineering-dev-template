@@ -15,16 +15,24 @@ if [ "$MATURITY" = "L1" ]; then
   exit 1
 fi
 
-"$BIN_DIR/budget-check" || { echo "SKIP: 予算ゲート"; exit 1; }
-
 WT="$REPO_ROOT/../$(basename "$REPO_ROOT")-issue-$ISSUE"
 BRANCH="loop/issue-$ISSUE"
 
+# 冪等性チェックはローカルな worktree/branch の存在確認だけで完結する安価な処理
+# なので、budget-check（ccusage を叩く高価な処理）より先に行う。
+# 理由は 2 つ:
+#   1. 既に in-flight は「正常な skip」であり exit 0 で報告すべきもの。
+#      これを budget-check より後にすると、予算を使い切っている日には
+#      in-flight でも exit 1「SKIP: 予算ゲート」に化けてしまい、
+#      呼び出し元/監視に偽の失敗として見えてしまう
+#   2. 何もしない tick のたびに ccusage を叩くのは無駄なコスト
 if [ -d "$WT" ] || git show-ref --verify --quiet "refs/heads/$BRANCH"; then
   record_state "maker issue-$ISSUE SKIPPED (既に in-flight: worktree/branch が存在)"
   echo "SKIP: issue-$ISSUE は既に in-flight"
   exit 0
 fi
+
+"$BIN_DIR/budget-check" || { echo "SKIP: 予算ゲート"; exit 1; }
 
 git worktree add "$WT" -b "$BRANCH" main || {
   record_state "maker issue-$ISSUE FAILED (worktree 作成に失敗)"
@@ -41,12 +49,15 @@ render_prompt "$LOOP_DIR/prompts/maker.md" \
 
 LOG="loops/runs/$(date +%Y-%m-%d)-maker-issue-$ISSUE.md"
 
+# $1 = 書き込み先のログパス。agent-run --log は非追記の tee なので、呼び出しごとに
+# 別パスを渡さないと前回の内容が消える（リトライ時に「1 回目がなぜ失敗したか」の
+# 記録を残すため、下のリトライ経路では別名の $RETRY_LOG を渡す）
 run_maker() {
-  "$BIN_DIR/agent-run" --role maker --prompt-file "$PROMPT" --cwd "$WT" --log "$LOG"
+  "$BIN_DIR/agent-run" --role maker --prompt-file "$PROMPT" --cwd "$WT" --log "$1"
 }
 
 RC=0
-run_maker || RC=$?
+run_maker "$LOG" || RC=$?
 
 # 一過性エラーは 1 回だけ自動リトライ。worktree が手つかず（未コミット変更なし・
 # main から進んでいない）のときだけ。作業途中で死んだ WIP は残置して人間が確認する
@@ -54,10 +65,14 @@ if [ "$RC" -ne 0 ] && is_transient_error "$LOG" \
    && [ -z "$(git -C "$WT" status --porcelain)" ] \
    && [ "$(git -C "$WT" rev-parse HEAD)" = "$(git rev-parse main)" ]; then
   DELAY="$(retry_delay)"
-  record_state "maker issue-$ISSUE 一過性エラー — ${DELAY}s 後に 1 回リトライ"
+  record_state "maker issue-$ISSUE 一過性エラー — ${DELAY}s 後に 1 回リトライ (1 回目のログ: $LOG)"
   sleep "$DELAY"
+  # 1 回目のログは上書きせず残す。以降 $LOG は最終試行（= 実際に採用された
+  # 結果）のログを指すよう付け替える
+  RETRY_LOG="${LOG%.md}.retry.md"
   RC=0
-  run_maker || RC=$?
+  run_maker "$RETRY_LOG" || RC=$?
+  LOG="$RETRY_LOG"
 fi
 
 if [ "$RC" -ne 0 ]; then
