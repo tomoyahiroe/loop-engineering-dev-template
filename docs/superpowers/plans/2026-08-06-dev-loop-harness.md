@@ -1585,18 +1585,30 @@ git commit -m "feat(cleanup): マージ済み loop worktree の片付けを追�
 # テスト用の gh スタブ。呼び出しを $GH_LOG に記録し、$GH_* 環境変数で応答を決める
 set -uo pipefail
 [ -n "${GH_LOG:-}" ] && echo "$*" >> "$GH_LOG"
+
+# 既定の JSON は必ず変数に入れてから ${VAR:-$DEFAULT} の形で使う。
+# ${VAR:-{"a":"b"}} のように波括弧を直接書くと、VAR が設定されているときだけ
+# 末尾に余分な } が付いて JSON が壊れる（bash 3.2 / 5.3 の両方で再現）
+DEFAULT_ISSUE_JSON='{"body":"","state":"OPEN"}'
+DEFAULT_PR_VIEW_JSON='{}'
+
 # set -u 下で単独引数（gh --version 等）でも落ちないよう既定値を付ける
 case "${1:-} ${2:-}" in
   "issue view")
     if [ "${3:-}" = "--json" ] || [ "${4:-}" = "--json" ]; then
-      echo "${GH_ISSUE_JSON:-{\"body\":\"\",\"state\":\"OPEN\"}}"
+      echo "${GH_ISSUE_JSON:-$DEFAULT_ISSUE_JSON}"
     fi
     ;;
-  "pr list")  echo "${GH_PR_LIST_JSON:-[]}" ;;
-  "pr view")  echo "${GH_PR_VIEW_JSON:-{}}" ;;
+  "issue list") echo "${GH_ISSUE_LIST_JSON:-[]}" ;;
+  "pr list")    echo "${GH_PR_LIST_JSON:-[]}" ;;
+  "pr view")    echo "${GH_PR_VIEW_JSON:-$DEFAULT_PR_VIEW_JSON}" ;;
+  "pr merge")   ;;
   *) ;;
 esac
 exit "${GH_EXIT:-0}"
+
+**注意:** この fixture は Task 3 の fix round で前倒し作成済み。
+Task 7 の時点では既存を確認するだけでよい（内容が上記と一致すること）。
 ```
 
 - [ ] **Step 2: 失敗するテストを書く**
