@@ -79,7 +79,6 @@ teardown() { rm -rf "$TMP"; }
 }
 
 @test "gh 経由: 依存が close 済みなら通過する" {
-  skip "fixtures/bin/gh:9 の \${GH_ISSUE_JSON:-{...}} が bash の展開バグで末尾に余分な } を付与し、JSON.parse が壊れる（bash 3.2/5.3 両方で再現）。コーディネーターの判断待ち"
   use_gh_stub
   GH_ISSUE_JSON='{"body":"## 背景\n背景の説明。\n\n## 受け入れ基準\n- [ ] `packages/web で pnpm test` が緑\n\n## 実装方針\n`packages/web/src/a.ts` を変更する。\n\n## スコープ外\nなし\n\n## 依存\n依存: #12","state":"CLOSED"}'
   export GH_ISSUE_JSON
@@ -89,7 +88,6 @@ teardown() { rm -rf "$TMP"; }
 }
 
 @test "gh 経由: 依存が未 close なら落ちる" {
-  skip "fixtures/bin/gh:9 の \${GH_ISSUE_JSON:-{...}} が bash の展開バグで末尾に余分な } を付与し、JSON.parse が壊れる（bash 3.2/5.3 両方で再現）。コーディネーターの判断待ち"
   use_gh_stub
   GH_ISSUE_JSON='{"body":"## 背景\n背景の説明。\n\n## 受け入れ基準\n- [ ] `packages/web で pnpm test` が緑\n\n## 実装方針\n`packages/web/src/a.ts` を変更する。\n\n## スコープ外\nなし\n\n## 依存\n依存: #12","state":"OPEN"}'
   export GH_ISSUE_JSON
