@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# schedule.* から supercronic 用の crontab を 1 行、標準出力に生成する。
+# 行の形: <分> <時リスト> * * * <firing のフルパス>
+# start_hour を起点に 24/firings_per_day 時間おきに発火する。
+# 24 を割り切らない firings_per_day は実際に生成できる回数に切り捨てる。
+#
+# 設計原則: どんな設定値（0・負数・25 以上・非数値など）が来ても、この
+# スクリプトが吐く crontab の行を絶対に壊さない。壊れた crontab 行は
+# supercronic に黙って無視され、誰にも気づかれないまま loop が一切
+# 発火しなくなる、というのがこのハーネスで最悪の壊れ方だから。
+# 異常値はすべて安全な既定値に丸め、何を丸めたかを stderr に知らせる。
+set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
+BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# 符号付き整数か、かつ桁数が安全な範囲内かを判定する。
+# bash 3.2 互換のため [[ =~ ]] は使わず、budget-check と同じ case グロブの
+# イディオムを使う。
+is_safe_int() {
+  local v="$1"
+  case "$v" in
+    -*) v="${v#-}" ;;
+  esac
+  case "$v" in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  [ "${#v}" -le 15 ]
+}
+
+# 警告は crontab 本体（stdout）より後に出す。bats の run は stdout/stderr を
+# 書き込み順のまま1本の $output にまとめるため、警告を先に出すと
+# 「crontab の行が $output の先頭に来る」という直感に反してしまう。
+WARN=""
+warn() { WARN="${WARN}$1
+"; }
+
+N_RAW="$(cfg schedule.firings_per_day)"
+START_RAW="$(cfg schedule.start_hour)"
+
+if is_safe_int "$N_RAW"; then
+  N="$N_RAW"
+else
+  warn "注意: schedule.firings_per_day=\"$N_RAW\" は整数として不正なため 1 回/日として扱いました"
+  N=1
+fi
+
+if is_safe_int "$START_RAW"; then
+  START="$START_RAW"
+else
+  warn "注意: schedule.start_hour=\"$START_RAW\" は整数として不正なため 0 時起点として扱いました"
+  START=0
+fi
+
+if [ "$N" -lt 1 ] 2>/dev/null; then
+  warn "注意: schedule.firings_per_day=$N は 1 未満のため 1 回/日に切り上げました"
+  N=1
+elif [ "$N" -gt 24 ] 2>/dev/null; then
+  warn "注意: schedule.firings_per_day=$N は 24 より大きいため 24 回/日（毎時）に切り下げました"
+  N=24
+fi
+
+# start_hour を 0-23 に正規化する（負数・24 以上どちらにも対応する二重剰余）
+NORM_START=$(( ((START % 24) + 24) % 24 ))
+if [ "$NORM_START" -ne "$START" ]; then
+  warn "注意: schedule.start_hour=$START を 0-23 の範囲に正規化して ${NORM_START} 時起点にしました"
+fi
+START="$NORM_START"
+
+STEP=$(( 24 / N ))
+[ "$STEP" -ge 1 ] || STEP=1
+ACTUAL=$(( 24 / STEP ))
+
+HOURS=""
+H="$START"
+I=0
+while [ "$I" -lt "$ACTUAL" ]; do
+  HOUR=$(( H % 24 ))
+  if [ -z "$HOURS" ]; then HOURS="$HOUR"; else HOURS="$HOURS,$HOUR"; fi
+  H=$(( H + STEP ))
+  I=$(( I + 1 ))
+done
+
+if [ "$ACTUAL" -ne "$N" ]; then
+  warn "注意: firings_per_day=$N は 24 を割り切らないため $ACTUAL 回/日に切り捨てました"
+fi
+
+echo "0 $HOURS * * * $BIN_DIR/firing"
+
+[ -n "$WARN" ] && printf '%s' "$WARN" >&2
+true

@@ -1,0 +1,33 @@
+# ループを常駐させる。docker compose up -d で起動し、以降ターミナルは不要。
+#
+# ${PWD}:${PWD} でホストと同じ絶対パスにマウントしているのは意図的です。
+# コンテナ内から docker compose を叩いたとき、ホストの Docker デーモンは
+# ホスト側のパスしか解決できないため、パスを一致させる必要があります（DooD）。
+#
+# ★ 注意（重要）: docker.sock を渡すことは、このコンテナにホストの root 相当の
+# 権限を与えることを意味します。コンテナ内のプロセスはホスト上の任意の
+# コンテナを起動・停止・削除でき、事実上ホストを操作できます。
+# これはローカル開発ツールとしての意図的な妥協です。信頼できないネットワーク
+# や共有ホストでは使わないでください。
+services:
+  loop:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ${PWD}:${PWD}
+      # ↑ DooD: ホストと同じ絶対パスでマウント（working_dir も同じ）
+      - /var/run/docker.sock:/var/run/docker.sock
+      # ↑ 上の「★ 注意」参照: ホストの root 相当の権限をコンテナに渡す
+      - loop-claude-auth:/root/.claude
+      - loop-gh-auth:/root/.config/gh
+    working_dir: ${PWD}
+    environment:
+      - REPO_ROOT=${PWD}
+      - TZ=${LOOP_TZ:-Asia/Tokyo}
+    network_mode: host
+    restart: unless-stopped
+
+volumes:
+  loop-claude-auth:
+  loop-gh-auth:
