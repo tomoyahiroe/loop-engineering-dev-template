@@ -2,19 +2,30 @@
 # main に取り込み済みの loop worktree / branch を片付ける。
 #
 # これは cron から無人で走り、判断を誤ると復旧不能な形で作業を消す
-# （Maker がまだどこにも push していない変更を持つ worktree かもしれない）。
-# 消してよいのは「ブランチの先頭コミットが main の祖先である」こと（=
-# 中身が確実に main に入っている）に加えて「worktree の作業ツリーに
-# 未コミット/未追跡の変更が一切ない」ことの両方を満たす場合だけ。
+# （Maker がまだどこにも push していない変更や、.env のような gitignore
+# 対象の未追跡データを持つ worktree かもしれない）。
+# 消してよいのは次のすべてを満たす場合だけ:
+#   1. ブランチ名が loop/issue-* または loop/preview-* である
+#   2. ブランチの先頭コミットが main の祖先である（= 中身が確実に main にある）
+#   3. worktree の作業ツリーに変更が一切ない
+#      （未コミット/未追跡はもちろん、.gitignore で無視される内容も含む。
+#      .env・ローカル DB・アップロード済みフィクスチャ等、gitignore 対象こそ
+#      復旧不能な実データである可能性が高いため、無視ファイルの存在だけで
+#      安全側に倒して worktree ごと丸ごと保持する。node_modules のような
+#      再生成可能な無視ファイルまで巻き込んで保守的に倒れるが、片付け漏れは
+#      人間が気付けるディレクトリが残るだけで、削除ミスのように復旧不能には
+#      ならない）
 # 判定できない・迷う場合は常に「触らない」側に倒す。
 #
 # 具体的に手を出さないもの:
 #   - 未マージのブランチ（作業中の可能性がある）
-#   - 未コミット/未追跡の変更が残る worktree（ブランチが merge 済みでも）
-#   - ブランチ名が loop/ で始まらない worktree
+#   - 変更（未コミット/未追跡/gitignore 対象いずれか）が残る worktree
+#     （ブランチが merge 済みでも）
+#   - ブランチ名が loop/issue-* / loop/preview-* 以外の worktree
+#     （人間が手で作った loop/my-experiment 等は対象外）
 #   - detached HEAD の worktree（porcelain 出力に branch 行が無く、
 #     そもそも下の case に一致しないので自然に対象外になる）
-#   - メインの作業ツリー自体（branch が main であり loop/ に一致しない）
+#   - メインの作業ツリー自体（branch が main であり対象パターンに一致しない）
 set -uo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
 cd "$REPO_ROOT" || exit 1
@@ -24,24 +35,29 @@ WT_PATH=""
 while IFS= read -r line; do
   case "$line" in
     "worktree "*) WT_PATH="${line#worktree }" ;;
-    "branch refs/heads/loop/"*)
+    "branch refs/heads/loop/issue-"*|"branch refs/heads/loop/preview-"*)
       BRANCH="${line#branch refs/heads/}"
       # main に取り込み済みか（= 中身が確実に main にある）
       if git merge-base --is-ancestor "$BRANCH" main 2>/dev/null; then
-        # worktree の作業ツリーに未コミット/未追跡の変更が残っていないか。
-        # `git status --porcelain` が空でない、または status 自体が失敗
-        # （worktree が壊れている等）した場合は、安全側に倒して一切触らない。
-        DIRTY="$(git -C "$WT_PATH" status --porcelain 2>&1)"
+        # worktree の作業ツリーに変更が残っていないか。--ignored を付けて
+        # gitignore 対象の未追跡ファイル（.env 等）も検出対象に含める。
+        # 出力が空でない、または status 自体が失敗（worktree が壊れている等）
+        # した場合は、安全側に倒して一切触らない。
+        DIRTY="$(git -C "$WT_PATH" status --porcelain --ignored 2>&1)"
         STATUS_RC=$?
         if [ "$STATUS_RC" -eq 0 ] && [ -z "$DIRTY" ]; then
           # --force は使わない。万一ここまでの判定に穴があっても、
           # git worktree remove 自身の「変更が残っていたら拒否する」保護を
           # 生かしたまま、失敗時は branch も消さない（&& で連鎖させる）
           if git worktree remove "$WT_PATH" 2>/dev/null; then
-            git branch -D "$BRANCH" >/dev/null 2>&1
-            # リモートブランチの削除は best-effort（失敗しても無視）
-            git push origin --delete "$BRANCH" >/dev/null 2>&1 || true
-            echo "片付け: $BRANCH ($WT_PATH)"
+            # branch -D が実際に成功した場合にのみ、リモート削除と成功report
+            # を行う（ローカル削除が失敗したのにリモートだけ消えて「成功」と
+            # 報告する不整合を避ける）
+            if git branch -D "$BRANCH" >/dev/null 2>&1; then
+              # リモートブランチの削除は best-effort（失敗しても無視）
+              git push origin --delete "$BRANCH" >/dev/null 2>&1 || true
+              echo "片付け: $BRANCH ($WT_PATH)"
+            fi
           fi
         fi
       fi
