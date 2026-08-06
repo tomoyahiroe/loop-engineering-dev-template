@@ -1,0 +1,4 @@
+node_modules/
+.loop/.preview.pid
+loops/runs/*.log
+.DS_Store

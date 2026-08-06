@@ -1,0 +1,38 @@
+# このファイルはあなたのもの。テンプレート同期で上書きされない。
+# 全キーと説明は .loop/defaults.toml を見る。
+
+maturity = "L2"
+
+[models]
+maker = "claude-sonnet-5"
+verifier = "claude-sonnet-5"
+
+[budget]
+daily_tokens = 120000000
+
+[schedule]
+firings_per_day = 12
+timezone = "Asia/Tokyo"
+
+[loop]
+max_open_prs = 4
+max_dispatch_per_day = 10
+auto_fix_rounds = 1
+
+[gate]
+max_files_touched = 8
+max_acceptance_criteria = 6
+
+# ここは必ず自分のプロジェクトに合わせて書き換える
+[project]
+test = "echo 'project.test を設定してください' && false"
+lint = "echo 'project.lint を設定してください' && false"
+preview = ""
+preview_port = 3000
+
+[mtg]
+voice = false
+
+[agents.claude]
+# Maker/Verifier に許可する追加コマンド（プロジェクトのツールチェーン）
+extra_tools = []
