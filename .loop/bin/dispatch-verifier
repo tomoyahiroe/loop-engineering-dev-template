@@ -25,6 +25,22 @@ if [ "$GATE_RC" -ne 0 ]; then
 fi
 
 WT="$REPO_ROOT/../$(basename "$REPO_ROOT")-verify-pr-$PR"
+
+# パスが既に存在するのは、大抵の場合 git worktree add 自体のバグではなく
+# 「別の起動がこの PR を既に検証中（またはその残骸）」という良性のレース。
+# git のエラーメッセージ文字列に頼って事後判定するより、事前にパスの有無だけで
+# 判定する方が git のバージョン差にも強い（dispatch-maker の「既に in-flight」
+# チェックと同じ考え方）。ここではまだ何も作っておらず trap も未 install なので、
+# そのまま exit すれば他の起動が使っている（かもしれない）ディレクトリには
+# 一切触れない。STATE.md は人間が毎朝読む一次情報なので、ここを FAILED と
+# 書くと本物のエラーと区別がつかず「FAILED は無視してよい」学習を招く。
+# 良性のレースだと分かっている場合は SKIPPED として exit 0 にする。
+if [ -e "$WT" ]; then
+  record_state "verifier pr-$PR SKIPPED (既に検証中の可能性: $WT が存在)"
+  echo "SKIP: pr-$PR の検証用 worktree は既に存在する（他の起動と競合の可能性）"
+  exit 0
+fi
+
 git worktree add --detach "$WT" main >/dev/null 2>&1 || {
   record_state "verifier pr-$PR FAILED (worktree 作成に失敗)"
   exit 1

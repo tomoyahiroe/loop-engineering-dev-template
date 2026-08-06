@@ -136,3 +136,48 @@ EOF
   # リトライ経路でも throwaway worktree はちゃんと消える
   [ ! -d "$TMP/repo-verify-pr-21" ]
 }
+
+# --- ここから fix round 1（レビュー指摘への対応） ---------------------------
+# STATE.md は人間が毎朝読む一次情報。「検証用 worktree パスが既に存在する」
+# という良性のレース（他の起動が同じ PR を検証中、等）を本物のエラーと同じ
+# FAILED で記録すると、運用者が FAILED を無視する学習をしてしまう。
+# このケースだけ SKIPPED として exit 0 にし、かつ他の起動が使っている
+# （かもしれない）ディレクトリには一切触れない（trap 未 install のまま return）
+# ことを固定する。
+
+@test "検証用 worktree パスが既に存在する場合は SKIPPED で 0 を返し、既存ディレクトリに触れない" {
+  mkdir -p "$TMP/repo-verify-pr-21"
+  echo "other-invocation-marker" > "$TMP/repo-verify-pr-21/marker.txt"
+
+  run "$LOOP_REAL_DIR/bin/dispatch-verifier" 21
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SKIP"* ]]
+
+  run tail -3 "$REPO_ROOT/loops/STATE.md"
+  [[ "$output" == *"SKIPPED"* ]]
+  [[ "$output" != *"FAILED"* ]]
+
+  # 既存ディレクトリとその中身が trap で消されていない（他の起動の worktree
+  # を巻き込んでいないことの直接証拠）
+  [ -d "$TMP/repo-verify-pr-21" ]
+  run cat "$TMP/repo-verify-pr-21/marker.txt"
+  [[ "$output" == "other-invocation-marker" ]]
+
+  # gh pr checkout まで到達していない（パス存在チェックで即 return したこと）
+  [ ! -f "$GH_LOG" ]
+}
+
+@test "既存パス以外の理由で worktree 作成に失敗したら FAILED を記録して 1 を返す" {
+  # main ブランチ名を変えて git worktree add --detach <WT> main を
+  # 「main が解決できない」という、パス存在とは無関係な genuine failure にする
+  git -C "$REPO_ROOT" branch -m main renamed-main
+
+  run "$LOOP_REAL_DIR/bin/dispatch-verifier" 21
+  [ "$status" -eq 1 ]
+
+  run tail -3 "$REPO_ROOT/loops/STATE.md"
+  [[ "$output" == *"FAILED"* ]]
+  [[ "$output" != *"SKIPPED"* ]]
+
+  [ ! -d "$TMP/repo-verify-pr-21" ]
+}
