@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# テスト用の gh スタブ。呼び出しを $GH_LOG に記録し、$GH_* 環境変数で応答を決める
+set -uo pipefail
+[ -n "${GH_LOG:-}" ] && echo "$*" >> "$GH_LOG"
+# set -u 下で単独引数（gh --version 等）でも落ちないよう既定値を付ける
+case "${1:-} ${2:-}" in
+  "issue view")
+    if [ "${3:-}" = "--json" ] || [ "${4:-}" = "--json" ]; then
+      echo "${GH_ISSUE_JSON:-{\"body\":\"\",\"state\":\"OPEN\"}}"
+    fi
+    ;;
+  "issue list") echo "${GH_ISSUE_LIST_JSON:-[]}" ;;
+  "pr list")    echo "${GH_PR_LIST_JSON:-[]}" ;;
+  "pr view")    echo "${GH_PR_VIEW_JSON:-{}}" ;;
+  "pr merge")   ;;
+  *) ;;
+esac
+exit "${GH_EXIT:-0}"

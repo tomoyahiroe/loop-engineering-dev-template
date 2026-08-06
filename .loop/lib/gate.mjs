@@ -44,7 +44,7 @@ export function checkIssue({ body, config, depStates = {} }) {
     v.push('受け入れ基準にチェックボックス（- [ ]）が 1 つもない');
   }
   for (const it of items) {
-    if (!/`[^`]+`/.test(it) && !it.startsWith('手動:')) {
+    if (!/`[^`]+`/.test(it) && !/^手動\s*[:：]/.test(it)) {
       v.push(`受け入れ基準に検証コマンドがない（コマンドで検証できないものは「手動:」で始める）: ${it}`);
     }
   }
