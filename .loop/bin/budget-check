@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# 予算ゲート（fail-closed）。0 = 実行可 / 1 = スキップ
+# 使用量が取れない・解析できない・数値でない場合は「使い切ったものとして扱う」
+set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
+
+# 非負整数かどうかを判定する（bash 3.2 互換、[[ =~ ]] は使わない）。
+# `[ "$x" -ge "$y" ]` は非数値を渡すと stderr に "integer expression expected"
+# を出しつつ終了コード 2 を返すだけで、set -e ではないので if は素通りして
+# false 扱いになる＝比較なしで exit 0 に落ちてしまう（fail-open）。
+# 比較の前に必ずこれを通し、数値でなければ明示的に fail-closed する。
+is_uint() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+LIMIT="$(cfg budget.daily_tokens)" || { echo "SKIP: budget.daily_tokens が未設定（fail-closed）"; exit 1; }
+is_uint "$LIMIT" || { echo "SKIP: budget.daily_tokens が数値でない（fail-closed）"; exit 1; }
+
+TODAY="$(date +%Y%m%d)"
+CCUSAGE="${LOOP_CCUSAGE_CMD:-npx --yes ccusage@latest}"
+
+RAW="$($CCUSAGE daily --json --since "$TODAY" --until "$TODAY" 2>/dev/null)" \
+  || { echo "SKIP: 使用量を取得できない（fail-closed）"; exit 1; }
+
+USED="$(printf '%s' "$RAW" | node "$LIB_DIR/sum-usage.mjs")" \
+  || { echo "SKIP: 使用量を解析できない（fail-closed）"; exit 1; }
+is_uint "$USED" || { echo "SKIP: 使用量を解析できない（fail-closed）"; exit 1; }
+
+echo "BUDGET: used=$USED limit=$LIMIT"
+if [ "$USED" -ge "$LIMIT" ]; then
+  echo "SKIP: 本日のトークン予算を使い切った"
+  exit 1
+fi
+exit 0
