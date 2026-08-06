@@ -50,9 +50,51 @@ teardown() { rm -rf "$TMP"; }
   printf '[agent]\nprovider = "nope"\n' > "$LOOP_DIR/config.toml"
   run "$LOOP_REAL_DIR/bin/agent-run" --role maker --prompt-file "$TMP/prompt.md" --cwd "$TMP"
   [ "$status" -eq 2 ]
+  [[ "$output" == *"provider スクリプトがない"* ]]
 }
 
 @test "--role がないと 2 で落ちる" {
   run "$LOOP_REAL_DIR/bin/agent-run" --prompt-file "$TMP/prompt.md" --cwd "$TMP"
   [ "$status" -eq 2 ]
+  [[ "$output" == *"maker|verifier|fixer"* ]]
+}
+
+@test "存在しない prompt-file は 2 で落ちる" {
+  run "$LOOP_REAL_DIR/bin/agent-run" --role maker --prompt-file "$TMP/nope.md" --cwd "$TMP"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"--prompt-file が見つからない"* ]]
+}
+
+@test "存在しない --cwd は 2 で落ちる" {
+  run "$LOOP_REAL_DIR/bin/agent-run" --role maker --prompt-file "$TMP/prompt.md" --cwd "$TMP/nope"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"--cwd が見つからない"* ]]
+}
+
+# 以下 4 件は「値のないフラグでハングしない」ことを保証する回帰テスト。
+# shift 2 の前のガードが失われると、while ループが $# を消費できず
+# 無限ループする。run はプロセスの終了を待つので、退行するとこのテストは
+# 通過も失敗もせず bats 全体がハングする（黙って通ってしまうことがない）。
+@test "--role に値がないと 2 で落ちる（ハングしない）" {
+  run "$LOOP_REAL_DIR/bin/agent-run" --role
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"「--role」に値がありません"* ]]
+}
+
+@test "--prompt-file に値がないと 2 で落ちる（ハングしない）" {
+  run "$LOOP_REAL_DIR/bin/agent-run" --role maker --prompt-file
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"「--prompt-file」に値がありません"* ]]
+}
+
+@test "--cwd に値がないと 2 で落ちる（ハングしない）" {
+  run "$LOOP_REAL_DIR/bin/agent-run" --role maker --prompt-file "$TMP/prompt.md" --cwd
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"「--cwd」に値がありません"* ]]
+}
+
+@test "--log に値がないと 2 で落ちる（ハングしない）" {
+  run "$LOOP_REAL_DIR/bin/agent-run" --role maker --prompt-file "$TMP/prompt.md" --cwd "$TMP" --log
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"「--log」に値がありません"* ]]
 }

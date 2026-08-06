@@ -10,13 +10,36 @@ set -uo pipefail
 # 設定の読み出しは実物の loop-config を使う（LOOP_DIR は環境変数で引き継がれる）
 CONFIG="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd)/loop-config"
 
+# loop-config get の終了コード 1（キー未定義）は許容して空扱いにする。
+# それ以外（config.toml が壊れているなどの読み込み失敗、終了コード 2）まで
+# || true で握りつぶすと、ツール許可リストが黙って空になり claude が
+# --allowedTools なしの無制限モードで起動してしまう。ツール許可リストは
+# 無人実行の唯一の安全境界なので、ここでは 2 種類のエラーを区別し、
+# 後者は握りつぶさず必ず中断する（誤って subshell の中で exit しても
+# 親プロセスには伝わらないため、コマンド置換はここでは使わない）。
 TOOLS=()
+
+TOOLS_OUT="$("$CONFIG" get "agents.claude.tools_$LOOP_ROLE" 2>&1)"; TOOLS_RC=$?
+if [ "$TOOLS_RC" -eq 1 ]; then
+  TOOLS_OUT=""
+elif [ "$TOOLS_RC" -ne 0 ]; then
+  echo "設定の読み出しに失敗しました（agents.claude.tools_${LOOP_ROLE}）: $TOOLS_OUT" >&2
+  exit 2
+fi
 while IFS= read -r line; do
   [ -n "$line" ] && TOOLS+=("$line")
-done < <("$CONFIG" get "agents.claude.tools_$LOOP_ROLE" || true)
+done <<< "$TOOLS_OUT"
+
+EXTRA_OUT="$("$CONFIG" get "agents.claude.extra_tools" 2>&1)"; EXTRA_RC=$?
+if [ "$EXTRA_RC" -eq 1 ]; then
+  EXTRA_OUT=""
+elif [ "$EXTRA_RC" -ne 0 ]; then
+  echo "設定の読み出しに失敗しました（agents.claude.extra_tools）: $EXTRA_OUT" >&2
+  exit 2
+fi
 while IFS= read -r line; do
   [ -n "$line" ] && TOOLS+=("$line")
-done < <("$CONFIG" get "agents.claude.extra_tools" || true)
+done <<< "$EXTRA_OUT"
 
 ARGS=(-p "$(cat "$LOOP_PROMPT_FILE")")
 [ -n "${LOOP_MODEL:-}" ] && ARGS+=(--model "$LOOP_MODEL")

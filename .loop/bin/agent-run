@@ -8,10 +8,14 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
 ROLE=""; PROMPT_FILE=""; RUN_CWD="$PWD"; LOG=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --role)        ROLE="${2:-}"; shift 2 ;;
-    --prompt-file) PROMPT_FILE="${2:-}"; shift 2 ;;
-    --cwd)         RUN_CWD="${2:-}"; shift 2 ;;
-    --log)         LOG="${2:-}"; shift 2 ;;
+    --role)        [ $# -ge 2 ] || { echo "「$1」に値がありません" >&2; exit 2; }
+                   ROLE="$2"; shift 2 ;;
+    --prompt-file) [ $# -ge 2 ] || { echo "「$1」に値がありません" >&2; exit 2; }
+                   PROMPT_FILE="$2"; shift 2 ;;
+    --cwd)         [ $# -ge 2 ] || { echo "「$1」に値がありません" >&2; exit 2; }
+                   RUN_CWD="$2"; shift 2 ;;
+    --log)         [ $# -ge 2 ] || { echo "「$1」に値がありません" >&2; exit 2; }
+                   LOG="$2"; shift 2 ;;
     *) echo "不明な引数: $1" >&2; exit 2 ;;
   esac
 done
