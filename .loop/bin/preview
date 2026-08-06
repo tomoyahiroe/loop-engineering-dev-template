@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+# アプリのプレビューを起動・停止する。MTG ① で「実際に動かして見る」ために使う。
+# DooD 構成なので、アプリが Docker を使っていてもポートはホストに公開される。
+# 用法: preview main | preview pr <N> | preview stop | preview status
+set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
+cd "$REPO_ROOT" || exit 1
+
+PID_FILE="$REPO_ROOT/loops/.preview.pid"
+META_FILE="$REPO_ROOT/loops/.preview.meta"
+
+# PID ファイルの中身が「kill してよい非負整数」かどうかだけを見る。
+# 空・非数値なら「起動していない」扱いにして fail-open する。ここで
+# 弾いておかないと、壊れた PID ファイル（空文字など）が stop の
+# `kill -- "-$PID"` に渡ったときに `-` 単体（= 自分自身のプロセス
+# グループ全体）に signal が飛びかねない。
+is_uint() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+}
+
+is_running() {
+  [ -f "$PID_FILE" ] || return 1
+  local pid
+  pid="$(cat "$PID_FILE" 2>/dev/null)"
+  is_uint "$pid" || return 1
+  # プロセスが実在しない（= stale な PID ファイル）なら「起動していない」
+  # 扱いにする。これをしないと、前回異常終了した PID ファイルが残るだけで
+  # preview main が永久に「既に起動しています」と拒否し続けて詰む。
+  kill -0 "$pid" 2>/dev/null
+}
+
+# start_in を呼ぶ前に「起動してよい状態か」だけを副作用なしで確認する。
+# pr サブコマンドが worktree を作る前にもこれを呼ぶ必要がある。ここを
+# 通さずに worktree を先に作ってしまうと、既に起動中で start_in が
+# 中断したときに detached worktree（cleanup-merged の対象外なので
+# preview stop でしか消せない）を作りっぱなしのまま残してしまう。
+require_can_start() {
+  local cmd
+  cmd="$(cfg project.preview || echo '')"
+  if [ -z "$cmd" ]; then
+    echo "SKIP: project.preview が未設定です（.loop/config.toml に書いてください）"
+    return 1
+  fi
+  if is_running; then
+    echo "既に起動しています（$(cat "$META_FILE" 2>/dev/null)）。先に preview stop してください"
+    return 1
+  fi
+}
+
+start_in() { # $1 = 作業ディレクトリ, $2 = 説明
+  local dir="$1" what="$2" cmd port pid
+  require_can_start || exit 1
+  cmd="$(cfg project.preview || echo '')"
+  port="$(cfg project.preview_port || echo 3000)"
+  mkdir -p "$REPO_ROOT/loops/runs"
+  # ジョブコントロール（set -m）を使い、起動したコマンドを新しい
+  # プロセスグループのリーダーにする。
+  #
+  # なぜ必要か: project.preview は npm/pnpm 等のラッパー経由で実サーバーを
+  # 起動することが多いが、ラッパー自身は exec で自分を置き換えず、実サーバー
+  # を子プロセスとして fork するだけのことが多い。素の $!（ラッパーの pid）
+  # だけを PID ファイルに書いて後で kill すると、ラッパーだけが死んで実
+  # サーバーは生き残り、ポートを握ったままになる（stop したのに preview
+  # status は STOPPED を返すのにアプリはまだ動いている、という壊れ方をする）。
+  # set -m でこのバックグラウンドジョブを新しいプロセスグループのリーダーに
+  # しておけば、ラッパーが fork した子孫も同じプロセスグループに残るので、
+  # stop 側でグループごと kill でき、この取りこぼしを防げる。
+  set -m
+  ( cd "$dir" && exec sh -c "$cmd" ) >> "$REPO_ROOT/loops/runs/preview.log" 2>&1 &
+  pid=$!
+  set +m
+  echo "$pid" > "$PID_FILE"
+  printf '%s http://localhost:%s\n' "$what" "$port" > "$META_FILE"
+  echo "プレビュー起動: $what -> http://localhost:$port （停止は preview stop）"
+}
+
+case "${1:-}" in
+  main)
+    start_in "$REPO_ROOT" "main"
+    ;;
+  pr)
+    PR="${2:-}"
+    [ -n "$PR" ] || { echo "用法: preview pr <N>" >&2; exit 2; }
+    # worktree を作る前に、起動できる状態かを確認する（副作用を始める前に
+    # 中断条件を確認する。理由は require_can_start のコメントを参照）
+    require_can_start || exit 1
+    WT="$REPO_ROOT/../$(basename "$REPO_ROOT")-preview-pr-$PR"
+    if [ ! -d "$WT" ]; then
+      git worktree add --detach "$WT" main >/dev/null 2>&1 || {
+        echo "worktree の作成に失敗しました" >&2; exit 1; }
+      ( cd "$WT" && gh pr checkout "$PR" --detach ) || {
+        git worktree remove --force "$WT" >/dev/null 2>&1
+        echo "PR #$PR の checkout に失敗しました" >&2; exit 1; }
+    fi
+    start_in "$WT" "PR #$PR"
+    ;;
+  stop)
+    STOP_FAILED=0
+    if is_running; then
+      PID="$(cat "$PID_FILE")"
+      # 自分（start_in）が起動したジョブなら、プロセスグループのリーダー
+      # なので pgid == pid になっているはず。PID が OS に再利用されて
+      # 無関係な別プロセスを指してしまっているケースでは、その無関係な
+      # プロセスが「たまたま自分自身のグループリーダーでもある」ことは
+      # 相対的にまれ（多くのプロセスは親シェルの pgid をそのまま引き継ぐ）
+      # なので、この一致を「自分が起動したものだと確認できた」ことの目安に
+      # 使う。完全な保証ではないが、無関係なプロセスグループ全体を巻き込む
+      # リスクは大きく減らせる。一致しない場合は、単発 kill にとどめて
+      # 巻き込みうる範囲を最小限にする。
+      PGID="$(ps -o pgid= -p "$PID" 2>/dev/null | tr -d ' ')"
+      if is_uint "$PGID" && [ "$PGID" = "$PID" ]; then
+        kill -TERM -- "-$PID" 2>/dev/null || true
+        sleep 1
+        kill -KILL -- "-$PID" 2>/dev/null || true
+      else
+        kill "$PID" 2>/dev/null || true
+        sleep 1
+        kill -9 "$PID" 2>/dev/null || true
+      fi
+      # SIGKILL 直後は一瞬 zombie 状態で kill -0 がまだ成功することがある
+      # （実機で確認済み）ので、消えるまで待ってから最終確認する。ここで
+      # 確認せずに rm -f して「停止しました」と報告すると、実際にはまだ
+      # 生きている（＝ポートを握ったままの）プロセスを見失う（pid ファイル
+      # が消えるので is_running は以後 STOPPED を返すが、実プロセスは
+      # 残ったまま）ことになりかねない。
+      #
+      # 固定の sleep では待ち時間が足りるかどうかがマシンの負荷次第になる
+      # （負荷が高いと、死につつあるプロセスを「停止に失敗」と誤報告して
+      # exit 1 する。preview のテストで実際に flake として観測された）。
+      # 上限付きのポーリングにして、消えたら即座に抜ける
+      for _ in 1 2 3 4 5 6 7 8 9 10; do
+        kill -0 "$PID" 2>/dev/null || break
+        sleep 0.3
+      done
+      if kill -0 "$PID" 2>/dev/null; then
+        STOP_FAILED=1
+      fi
+    fi
+    if [ "$STOP_FAILED" -eq 1 ]; then
+      # ${PID} と括るのは必須。$PID）と書くと bash が全角括弧まで変数名として
+      # 読み、set -u 下で "unbound variable" になってこの行が実行されない
+      echo "停止に失敗しました: プロセス（pid ${PID}）がまだ残っている可能性があります" >&2
+    else
+      rm -f "$PID_FILE" "$META_FILE"
+    fi
+    # PR プレビュー用の worktree を片付ける（detached HEAD のため
+    # cleanup-merged の対象にならず、ここでしか消せない）
+    while IFS= read -r line; do
+      case "$line" in
+        "worktree "*"-preview-pr-"*)
+          git worktree remove --force "${line#worktree }" >/dev/null 2>&1 || true ;;
+      esac
+    done < <(git worktree list --porcelain)
+    git worktree prune >/dev/null 2>&1
+    if [ "$STOP_FAILED" -eq 1 ]; then
+      exit 1
+    fi
+    echo "プレビューを停止しました"
+    ;;
+  status)
+    if is_running; then
+      echo "RUNNING $(cat "$PID_FILE") $(cat "$META_FILE" 2>/dev/null)"
+    else
+      echo "STOPPED"
+    fi
+    ;;
+  *)
+    echo "用法: preview main | preview pr <N> | preview stop | preview status" >&2
+    exit 2
+    ;;
+esac

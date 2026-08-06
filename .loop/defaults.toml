@@ -1,0 +1,89 @@
+# dev-loop ハーネスの既定値。このファイルはテンプレート所有。
+# テンプレート同期のたびに丸ごと上書きされる。
+# 変えたい値は .loop/config.toml に書く（同期で触られない）。
+
+# L1 = 判定と報告だけ。dispatch しない
+# L2 = Maker → PR → Verifier まで自動。merge は人間（既定）
+# L3 = Verifier approve かつ loop.auto_merge_label が付いていれば自動 merge
+maturity = "L2"
+
+[agent]
+# .loop/agents/<provider>.sh を呼ぶ
+provider = "claude"
+
+[models]
+maker = "claude-sonnet-5"
+verifier = "claude-sonnet-5"
+fixer = "claude-sonnet-5"
+
+[turns]
+# 1 回の実行の最大ターン数。粒度ゲート(gate.max_files_touched)をすり抜けた
+# ときの最後の砦であり、日常的に触るダイヤルではない
+maker = 120
+verifier = 30
+fixer = 60
+
+[budget]
+# 1 日のトークン上限。超えたら firing は dispatch しない（fail-closed）
+daily_tokens = 120000000
+
+[schedule]
+# start_hour を起点に 24/firings_per_day 時間おきに発火する
+firings_per_day = 12
+start_hour = 1
+timezone = "Asia/Tokyo"
+
+[loop]
+max_open_prs = 4
+max_dispatch_per_day = 10
+# Verifier の request-changes 後に Fixer が再修正する回数の上限（0 で無効）
+auto_fix_rounds = 1
+# L3 で自動 merge を許可する Issue ラベル
+auto_merge_label = "loop:auto-merge"
+
+[retry]
+# 一過性エラー（DNS/接続系）を検知したときのリトライ待ち秒数
+delay_seconds = 600
+
+[gate]
+required_sections = ["## 背景", "## 受け入れ基準", "## 実装方針", "## スコープ外", "## 依存"]
+max_files_touched = 8
+max_acceptance_criteria = 6
+
+[project]
+# このプロジェクト固有のコマンド。config.toml で必ず設定する
+test = "echo 'project.test が未設定です' && false"
+lint = "echo 'project.lint が未設定です' && false"
+preview = ""
+preview_port = 3000
+
+[mtg]
+# VOICEVOX による読み上げ（opt-in）
+voice = false
+voice_speaker_id = 29
+
+[agents.claude]
+tools_maker = [
+  "Read", "Glob", "Grep", "Edit", "Write",
+  "Bash(git:*)", "Bash(gh issue view:*)", "Bash(gh issue comment:*)",
+  "Bash(gh issue edit:*)", "Bash(gh pr create:*)"
+]
+tools_verifier = [
+  "Read", "Glob", "Grep",
+  "Bash(gh pr view:*)", "Bash(gh pr diff:*)", "Bash(gh pr review:*)",
+  "Bash(gh pr edit:*)", "Bash(gh pr comment:*)", "Bash(gh issue view:*)",
+  "Bash(git log:*)", "Bash(git diff:*)"
+]
+tools_fixer = [
+  "Read", "Glob", "Grep", "Edit", "Write",
+  "Bash(git:*)", "Bash(gh pr view:*)", "Bash(gh pr diff:*)",
+  "Bash(gh pr comment:*)", "Bash(gh issue view:*)", "Bash(gh issue edit:*)"
+]
+# プロジェクトのビルド/テストコマンドは config.toml でここに足す。
+# 例: extra_tools = ["Bash(pnpm:*)", "Bash(npx:*)", "Bash(node:*)"]
+#
+# 上の tools_* には git / gh の Bash しか含まれていない。[project] の
+# test / lint を実行するには、そのコマンドの許可をここに足す必要がある
+# （足さないと Verifier がテストを 1 つも実行できないまま diff だけを見て
+# approve してしまうため、dispatch-* は起動を拒否する）
+extra_tools = []

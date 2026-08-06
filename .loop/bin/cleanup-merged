@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# main に取り込み済みの loop worktree / branch を片付ける。
+#
+# これは cron から無人で走り、判断を誤ると復旧不能な形で作業を消す
+# （Maker がまだどこにも push していない変更や、.env のような gitignore
+# 対象の未追跡データを持つ worktree かもしれない）。
+# 消してよいのは次のすべてを満たす場合だけ:
+#   1. ブランチ名が loop/issue-* または loop/preview-* である
+#   2. ブランチの中身が確実に main にある
+#      （通常の merge = 先頭コミットが main の祖先、
+#        squash / rebase merge = main に merge しても何も変わらない。
+#        判定は branch_content_is_in_main を参照）
+#   3. worktree の作業ツリーに変更が一切ない
+#      （未コミット/未追跡はもちろん、.gitignore で無視される内容も含む。
+#      .env・ローカル DB・アップロード済みフィクスチャ等、gitignore 対象こそ
+#      復旧不能な実データである可能性が高いため、無視ファイルの存在だけで
+#      安全側に倒して worktree ごと丸ごと保持する。node_modules のような
+#      再生成可能な無視ファイルまで巻き込んで保守的に倒れるが、片付け漏れは
+#      人間が気付けるディレクトリが残るだけで、削除ミスのように復旧不能には
+#      ならない）
+# 判定できない・迷う場合は常に「触らない」側に倒す。
+#
+# 具体的に手を出さないもの:
+#   - 未マージのブランチ（作業中の可能性がある）
+#   - 変更（未コミット/未追跡/gitignore 対象いずれか）が残る worktree
+#     （ブランチが merge 済みでも）
+#   - ブランチ名が loop/issue-* / loop/preview-* 以外の worktree
+#     （人間が手で作った loop/my-experiment 等は対象外）
+#   - detached HEAD の worktree（porcelain 出力に branch 行が無く、
+#     そもそも下の case に一致しないので自然に対象外になる）
+#   - メインの作業ツリー自体（branch が main であり対象パターンに一致しない）
+set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
+cd "$REPO_ROOT" || exit 1
+
+# ブランチの中身が main に取り込み済みかを判定する。真を返した場合だけ削除の
+# 対象になり得る（ほかの安全条件は呼び出し側で別途確認する）。
+#
+# merge-base --is-ancestor だけでは squash merge を検出できない。firing の
+# L3 自動 merge は `gh pr merge --squash` を使い、人間も squash / rebase merge を
+# 選べる。squash merge されたブランチの先頭コミットは main の祖先にならない
+# ので、旧実装ではループが自分で merge した PR の worktree とブランチが
+# 1 件も片付かず、フルチェックアウトが merge のたびに積み上がっていた。
+#
+# 追加の判定は「main にこのブランチを merge しても何も変わらないか」を
+# git merge-tree で実際に試すことで行う（作業ツリーには一切触らない）。
+# マージ結果のツリーが現在の main のツリーと完全に一致する場合だけ
+# 「取り込み済み」とみなす。
+#
+# この方式を選んだ理由（どれも「迷ったら消さない」に倒れる）:
+#   - ツリーの完全一致で判定するので、中身が「似ているだけ」のブランチには
+#     一致しない。git cherry / patch-id 方式は差分の空白を無視するため、
+#     空白だけが違うブランチを merge 済みと誤判定してしまう（実測で確認済み）
+#   - main に無い変更を持つブランチはコンフリクトして 0 以外で終わる
+#   - 一度 merge されたあと main 側で revert された場合は「未取り込み」に
+#     倒れる（消さない）
+#   - git が古くて --write-tree を解釈できない場合も 0 以外で終わるので、
+#     「片付けない」側に倒れる（片付け漏れは人間が気付けるが、削除ミスは
+#     復旧できない）
+branch_content_is_in_main() { # $1 = ブランチ名
+  local out rc merged_tree main_tree
+  # 通常の merge / fast-forward。祖先関係は merge driver の影響を受けないので
+  # この判定は常に正確
+  git merge-base --is-ancestor "$1" main 2>/dev/null && return 0
+
+  # カスタム merge driver が 1 つでも設定されていたら、tree 一致による判定は
+  # 使わない（= 片付けない）。
+  #
+  # .gitattributes の `merge=<name>` と `merge.<name>.driver` の組み合わせは、
+  # lockfile や CHANGELOG を「常に ours を採用する」ために広く使われる定石。
+  # このとき merge-tree はブランチ側の変更を driver の指示どおり捨てるため、
+  # ブランチが main に無い作業を持っていてもマージ結果は main のツリーと
+  # 一致し得る（rc=0）。実測で再現済み: 双方が driver 管理下のファイルを
+  # 変更していると、ブランチの未マージの内容が結果に残らないまま
+  # 「取り込み済み」と判定され、worktree・ローカルブランチ・リモート
+  # ブランチまで削除されてしまう。
+  #
+  # 判定そのものを driver に合わせて精密化する道もあるが、このファイルの
+  # 削除は復旧不能であり、誤検出の代償が大きすぎる。driver が設定された
+  # リポジトリでは squash merge の検出を諦める（= 修正前と同じ片付け漏れに
+  # 戻るだけ。人間が気付ける残骸が増えるだけで、失われるものは無い）。
+  #
+  # git config --get-regexp は一致が無ければ 1 を返す（system/global/local の
+  # すべてのスコープを見る）
+  if git config --get-regexp '^merge\.[^.]*\.driver$' >/dev/null 2>&1; then
+    return 1
+  fi
+
+  out="$(git merge-tree --write-tree main "$1" 2>/dev/null)"
+  rc=$?
+  [ "$rc" -eq 0 ] || return 1
+  merged_tree="$(printf '%s\n' "$out" | head -1)"
+  [ -n "$merged_tree" ] || return 1
+  main_tree="$(git rev-parse --verify --quiet 'main^{tree}' 2>/dev/null)"
+  [ -n "$main_tree" ] || return 1
+  [ "$merged_tree" = "$main_tree" ]
+}
+
+# worktree のパスとブランチを対にして取り出す
+WT_PATH=""
+while IFS= read -r line; do
+  case "$line" in
+    "worktree "*) WT_PATH="${line#worktree }" ;;
+    "branch refs/heads/loop/issue-"*|"branch refs/heads/loop/preview-"*)
+      BRANCH="${line#branch refs/heads/}"
+      # 実行中の dispatcher が所有権を主張している worktree には触らない。
+      # まだ 1 度もコミットしていない Maker の worktree は「main と同一・
+      # クリーン」であり、片付けてよい残骸と姿が完全に同じになるため、
+      # この確認がないと実行中の Maker の足元を消してしまう
+      if worktree_is_claimed "$BRANCH"; then
+        :
+      # main に取り込み済みか（= 中身が確実に main にある）。
+      # squash / rebase merge も検出する（branch_content_is_in_main のコメント参照）
+      elif branch_content_is_in_main "$BRANCH"; then
+        # worktree の作業ツリーに変更が残っていないか。--ignored を付けて
+        # gitignore 対象の未追跡ファイル（.env 等）も検出対象に含める。
+        # 出力が空でない、または status 自体が失敗（worktree が壊れている等）
+        # した場合は、安全側に倒して一切触らない。
+        DIRTY="$(git -C "$WT_PATH" status --porcelain --ignored 2>&1)"
+        STATUS_RC=$?
+        if [ "$STATUS_RC" -eq 0 ] && [ -z "$DIRTY" ]; then
+          # --force は使わない。万一ここまでの判定に穴があっても、
+          # git worktree remove 自身の「変更が残っていたら拒否する」保護を
+          # 生かしたまま、失敗時は branch も消さない（&& で連鎖させる）
+          if git worktree remove "$WT_PATH" 2>/dev/null; then
+            # branch -D が実際に成功した場合にのみ、リモート削除と成功report
+            # を行う（ローカル削除が失敗したのにリモートだけ消えて「成功」と
+            # 報告する不整合を避ける）
+            if git branch -D "$BRANCH" >/dev/null 2>&1; then
+              # リモートブランチの削除は best-effort（失敗しても無視）
+              git push origin --delete "$BRANCH" >/dev/null 2>&1 || true
+              echo "片付け: $BRANCH ($WT_PATH)"
+              # 削除は不可逆なので、cron の stdout（誰も読まない）だけでなく
+              # 人間が毎朝読む STATE.md にも残す。実際に消したときだけ記録
+              # するので、片付けるものが無い tick は無音のまま（空回りゼロ）
+              record_state "片付け: $BRANCH ($WT_PATH)"
+            fi
+          fi
+        fi
+      fi
+      ;;
+  esac
+done < <(git worktree list --porcelain)
+
+git worktree prune
+exit 0

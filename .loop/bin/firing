@@ -1,0 +1,249 @@
+#!/usr/bin/env bash
+# スケジュール発火の唯一の入口。cron から呼ばれる。
+# 何もすることがなければ何も記録せず終了する（空回りゼロ）。
+# 用法: firing [--dry-run]
+set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
+BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$REPO_ROOT" || exit 1
+
+DRY=0
+[ "${1:-}" = "--dry-run" ] && DRY=1
+
+DATE="$(date +%Y-%m-%d)"
+MATURITY="$(cfg maturity)"
+
+# JSON から値を取り出す小さなヘルパー（jq に依存しない）
+jnode() { node -e "$1"; }
+
+# --- 0. origin/main 同期 ---------------------------------------------------
+if [ "$DRY" = 0 ] && [ "${LOOP_SKIP_FETCH:-0}" != "1" ]; then
+  git fetch origin >/dev/null 2>&1 || true
+  if git rev-parse --verify --quiet origin/main >/dev/null; then
+    if ! git merge --no-edit origin/main >/dev/null 2>&1; then
+      git merge --abort >/dev/null 2>&1 || true
+      record_state "firing 中止: origin/main とのコンフリクト"
+      exit 1
+    fi
+  fi
+fi
+
+# --- 1. マージ済み worktree の片付け ---------------------------------------
+[ "$DRY" = 0 ] && "$BIN_DIR/cleanup-merged" || true
+
+# --- 2. 状況の収集 ---------------------------------------------------------
+READY_JSON="$(gh issue list --label loop:ready --state open --json number 2>/dev/null || echo '[]')"
+NEXT_ISSUE="$(printf '%s' "$READY_JSON" | jnode '
+let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+  try{const a=JSON.parse(s);const n=a.map(x=>x.number);
+    process.stdout.write(n.length?String(Math.min(...n)):"");}catch{process.stdout.write("")}})')"
+
+PR_JSON="$(gh pr list --state open --json number,headRefName,reviewDecision,labels 2>/dev/null || echo '[]')"
+N_OPEN="$(printf '%s' "$PR_JSON" | jnode '
+let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+  try{const a=JSON.parse(s);
+    process.stdout.write(String(a.filter(p=>String(p.headRefName).startsWith("loop/issue-")).length));}
+  catch{process.stdout.write("999")}})')"
+
+MAX_PRS="$(cfg loop.max_open_prs)"
+MAXD="$(cfg loop.max_dispatch_per_day)"
+# *-maker-issue-<N>.md の glob は *-maker-issue-<N>.retry.md にも一致してしまう
+# （dispatch-maker が一過性エラーの 1 回リトライで書く別ファイル。元の .md は
+# 消さずに残す設計のため両方存在し得る）。1 回の論理的な dispatch がリトライ
+# しただけで 2 件と数えられ、max_dispatch_per_day を実際より早く使い切って
+# しまうので、.retry.md は数えない
+N_TODAY="$(ls "loops/runs/$DATE"-maker-issue-*.md 2>/dev/null | grep -v '\.retry\.md$' | wc -l | tr -d ' ')"
+
+# --- 2.5 request-changes の PR を最優先で Fixer に回す ---------------------
+# NEXT_ISSUE（新規 dispatch 候補）の有無に関わらず動く。既存 PR の fix chain は
+# 新規 Issue の着手可否とは独立した仕事であり、ready な Issue が無い tick でも
+# 止めてはいけない（そのため section 3 の「何もなければ黙って終わる」より前に置く）
+AUTO_FIX_ROUNDS="$(cfg loop.auto_fix_rounds)"
+if [ "$DRY" = 0 ] && [ "$MATURITY" != "L1" ] && [ "$AUTO_FIX_ROUNDS" -gt 0 ] 2>/dev/null; then
+  while IFS="$(printf '\t')" read -r FPR FISSUE; do
+    [ -n "$FPR" ] || continue
+    # ラウンド数を持つカウンタは存在しない。このログファイル名の r<N> こそが
+    # 「実施済みラウンド」の唯一の記録（dispatch-fixer 側のコメント参照）。
+    # glob は "-fixer-pr-<N>-r" というプレフィックスを固定しているので、
+    # dispatch-maker が書く *-maker-issue-<N>.retry.md のような無関係な
+    # ログとは衝突しない（N_TODAY の二重カウント事故の教訓を踏まえ、ここでも
+    # 意図的にプレフィックスを厳密にしている）。
+    #
+    # 日付は含めない。auto_fix_rounds は「その PR に何ラウンドまで自動修正を
+    # 試すか」であって「1 日あたり何ラウンドか」ではない。日付で区切ると、
+    # 恒久的に詰まった PR に毎日新しい有料のラウンドが無期限に割り当てられる
+    DONE_ROUNDS="$(ls loops/runs/*-fixer-pr-"$FPR"-r*.md 2>/dev/null | wc -l | tr -d ' ')"
+    if [ "$DONE_ROUNDS" -ge "$AUTO_FIX_ROUNDS" ]; then
+      # 上限到達は tick を跨いでも自然には解消しない（人間が直すまで PR は
+      # request-changes のまま毎 tick ここに来る）。何もしないと同じ STATE 行と
+      # needs-human の再付与を 1 日 12 回、無期限に繰り返す。L3 merge 失敗と
+      # 同じローカルマーカー方式で 1 回に抑える。順序も同じ原則:
+      # 「以後の報告を抑制する操作（マーカー作成）は informative な手より後」
+      FXMARKER="loops/.fix-exhausted-$FPR"
+      if [ ! -f "$FXMARKER" ]; then
+        record_state "pr-$FPR 自動修正の上限 ($DONE_ROUNDS/$AUTO_FIX_ROUNDS) — needs-human"
+        gh issue edit "$FISSUE" --add-label needs-human >/dev/null 2>&1 || true
+        touch "$FXMARKER" 2>/dev/null || true
+      fi
+      continue
+    fi
+    # まだラウンドが残っている = 過去の「上限到達」記録はもう有効ではない
+    # （人間が auto_fix_rounds を上げた場合など）。次に使い切ったとき、また
+    # 1 回だけ報告できるように片付けておく
+    rm -f "loops/.fix-exhausted-$FPR" 2>/dev/null || true
+    NEXT_ROUND=$((DONE_ROUNDS + 1))
+    echo "firing: dispatching fixer for PR #$FPR (round $NEXT_ROUND)"
+    "$BIN_DIR/dispatch-fixer" "$FPR" "$FISSUE" "$NEXT_ROUND" || true
+  done < <(printf '%s' "$PR_JSON" | node "$LIB_DIR/pr-triage.mjs" --mode needs-fix)
+fi
+
+# --- 2.6 L3: approve 済み かつ auto-merge ラベル付きの PR を merge ---------
+# merge は不可逆な最終手段なので、この if の外側では絶対に副作用を起こさない
+# （--dry-run はこの節に到達する前提自体を DRY=0 で塞いでいる）。
+# merge 成功時は PR が closed になり、次 tick の gh pr list --state open には
+# もう出てこなくなるので、それ以上の自己修復操作は不要（成功時のリトライ
+# 停止は merge そのものが担う）。
+#
+# 一方、失敗は一過性とは限らない。branch protection 未整合や conflict は
+# tick を跨いでも自然には解消しない持続的な原因であることが多く、何もせず
+# 毎 tick 記録すると「解消しない失敗」が schedule.firings_per_day 回/日で
+# 無期限に STATE.md（人間が毎朝読む一次情報）に積み上がる。gate-remediation
+# ブロックで対処したのと同種の問題なので、同じ「PR ごとのローカルな
+# マーカーファイルで冪等性を判定する」方式を流用する（reason の指紋までは
+# 持たせない — ここでは merge 失敗を単一の事象として扱い、PR 1 件につき
+# 1 回の記録で足りるため）。原則は同じ: 「以後の報告を抑制する操作
+# （マーカー作成）は、informative な手（record_state・needs-human 付与）
+# より後に置く」。先に record_state が失敗しても needs-human が付かなくても、
+# マーカーさえ書かれていなければ次 tick でまた最初からやり直せる
+if [ "$DRY" = 0 ] && [ "$MATURITY" = "L3" ]; then
+  AM_LABEL="$(cfg loop.auto_merge_label)"
+  while IFS="$(printf '\t')" read -r MPR MISSUE; do
+    [ -n "$MPR" ] || continue
+    MMARKER="loops/.merge-failed-$MPR"
+    if gh pr merge "$MPR" --squash --delete-branch >/dev/null 2>&1; then
+      record_state "L3 自動 merge: PR #$MPR (issue #$MISSUE)"
+      echo "firing: auto-merged PR #$MPR"
+      # 過去に失敗記録が残っていても、成功した以上もう有効ではない
+      rm -f "$MMARKER" 2>/dev/null || true
+    elif [ -f "$MMARKER" ]; then
+      # 同じ PR について既に 1 回記録済み。merge 自体は毎 tick 静かに
+      # リトライし続けるが（自己修復のため）、STATE への追記はしない
+      :
+    else
+      record_state "L3 自動 merge に失敗: PR #$MPR — needs-human"
+      gh issue edit "$MISSUE" --add-label needs-human >/dev/null 2>&1 || true
+      touch "$MMARKER" 2>/dev/null || true
+    fi
+  done < <(printf '%s' "$PR_JSON" | node "$LIB_DIR/pr-triage.mjs" --mode auto-merge --label "$AM_LABEL")
+fi
+
+# --- 3. 何もすることがなければ静かに終わる ---------------------------------
+if [ -z "$NEXT_ISSUE" ]; then
+  [ "$DRY" = 1 ] && echo "DRY RUN: ready な Issue なし（何もしない）"
+  exit 0
+fi
+
+# --- 4. 上限チェック（fail-closed） ----------------------------------------
+if [ "$N_OPEN" -ge "$MAX_PRS" ]; then
+  MSG="dispatch スキップ #$NEXT_ISSUE (open PR 上限 $N_OPEN/$MAX_PRS)"
+  [ "$DRY" = 1 ] && { echo "DRY RUN: $MSG"; exit 0; }
+  record_state "$MSG"; exit 0
+fi
+if [ "$N_TODAY" -ge "$MAXD" ]; then
+  MSG="dispatch スキップ #$NEXT_ISSUE (本日の日次上限 $N_TODAY/$MAXD)"
+  [ "$DRY" = 1 ] && { echo "DRY RUN: $MSG"; exit 0; }
+  record_state "$MSG"; exit 0
+fi
+
+GATE_RC=0
+GATE_OUT="$("$BIN_DIR/budget-check")" || GATE_RC=$?
+if [ "$GATE_RC" -ne 0 ]; then
+  MSG="dispatch スキップ #$NEXT_ISSUE (予算: $(echo "$GATE_OUT" | grep '^SKIP' | head -1))"
+  [ "$DRY" = 1 ] && { echo "DRY RUN: $MSG"; exit 0; }
+  record_state "$MSG"; exit 0
+fi
+
+# --- 5. gate 再検証（Issue は MTG 後に編集されうる） ------------------------
+GRC=0
+GOUT="$("$BIN_DIR/loop-gate" "$NEXT_ISSUE" 2>&1)" || GRC=$?
+# remediation 済みかどうかの印は、GitHub 側のラベル状態ではなく、この
+# リポジトリが所有するローカルなマーカーファイルに持たせる（round 2 で導入）。
+# 判定材料自体が gh 呼び出し（失敗し得る）だと、その呼び出しが失敗する
+# タイミングで誤判定するため。
+MARKER="loops/.gate-failed-$NEXT_ISSUE"
+if [ "$GRC" -ne 0 ]; then
+  MSG="dispatch 中止 #$NEXT_ISSUE (gate 不合格。ready を剥がして needs-human)"
+  if [ "$DRY" = 1 ]; then echo "DRY RUN: $MSG"; echo "$GOUT"; exit 0; fi
+
+  # マーカーには「どの理由で remediate したか」の指紋（$GOUT のハッシュ）を
+  # 持たせる。理由が変わった（= 人間が re-label したが今度は別の箇所で
+  # gate に落ちた）のに古いマーカーだけで判定すると、新しい理由の説明が
+  # 二度と届かなくなるため（round 3 で指摘）
+  FINGERPRINT="$(printf '%s' "$GOUT" | node -e '
+let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+  const crypto=require("crypto");
+  process.stdout.write(crypto.createHash("sha256").update(s).digest("hex"));
+})')"
+  STORED_FP=""
+  [ -f "$MARKER" ] && STORED_FP="$(head -1 "$MARKER" 2>/dev/null)"
+
+  if [ -n "$STORED_FP" ] && [ "$STORED_FP" = "$FINGERPRINT" ]; then
+    # 同じ理由で既に remediate 済み（コメント投稿・STATE 記録まで成功
+    # 済み）。ここで再びやることは、loop:ready の除去（唯一の自己修復
+    # 手段）のリトライだけ。コメント・STATE 記録は増やさず静かに終わる
+    gh issue edit "$NEXT_ISSUE" --remove-label loop:ready >/dev/null 2>&1 || true
+    exit 0
+  fi
+
+  # 未 remediate（今回が初回）、またはマーカーはあるが理由が変わった。
+  # 構造上の原則: 「リトライを止める操作（loop:ready の除去）は最後に
+  # 行う」。これを先頭でやってしまうと、それ以降のどの一手が失敗しても
+  # 二度とリトライされない一発勝負になる（round 3 で発見: 除去だけ成功し
+  # コメントが失敗すると、marker も comment も needs-human も STATE も
+  # 何も残らないまま Issue が ready 一覧から静かに消える）。
+  # コメントをまず投稿し、失敗したら何もラベルに触れずに抜ける
+  # （loop:ready はまだ付いたままなので、次 tick が自然に再選定して
+  # 丸ごとリトライする）
+  if ! gh issue comment "$NEXT_ISSUE" --body "loop-gate 不合格のため dispatch を中止しました。
+
+\`\`\`
+$GOUT
+\`\`\`" >/dev/null 2>&1; then
+    exit 0
+  fi
+
+  gh issue edit "$NEXT_ISSUE" --add-label needs-human >/dev/null 2>&1 || true
+  {
+    printf '%s\n' "$FINGERPRINT"
+    printf '%s: %s\n' "$(date +%Y-%m-%d)" "$MSG"
+  } > "$MARKER"
+  record_state "$MSG"
+  # リトライを止める操作は最後。ここまでの 3 手（コメント・付与・マーカー
+  # +STATE）は成功済みなので、これが失敗しても次 tick はマーカー一致で
+  # 「除去だけ再試行」の自己修復経路に入り、コメント・STATE は増えない
+  gh issue edit "$NEXT_ISSUE" --remove-label loop:ready >/dev/null 2>&1 || true
+  exit 0
+fi
+
+# gate に通った以上、過去の gate-fail マーカーはもう有効ではない。
+# regression（編集し直した Issue が後でまた gate に落ちる）に備えて、
+# dispatch 経路に進む前に後始末しておく（そうすれば次に落ちたときまた
+# remediate できる）
+[ "$DRY" = 0 ] && rm -f "$MARKER" 2>/dev/null || true
+
+# --- 6. L1 は報告だけ ------------------------------------------------------
+if [ "$MATURITY" = "L1" ]; then
+  MSG="L1 (報告のみ): 今なら #$NEXT_ISSUE を dispatch する"
+  [ "$DRY" = 1 ] && { echo "DRY RUN: $MSG"; exit 0; }
+  record_state "$MSG"; exit 0
+fi
+
+if [ "$DRY" = 1 ]; then
+  echo "DRY RUN: #$NEXT_ISSUE を dispatch する (open PR $N_OPEN/$MAX_PRS, 本日 $N_TODAY/$MAXD)"
+  exit 0
+fi
+
+# --- 7. Maker → Verifier ---------------------------------------------------
+echo "firing: dispatching maker for issue #$NEXT_ISSUE"
+"$BIN_DIR/dispatch-maker" "$NEXT_ISSUE" || echo "maker dispatch 失敗（loops/runs/ を確認）"
+exit 0

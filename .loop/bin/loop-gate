@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Issue の構造を機械検証する。通過で 0、不合格で 1（違反を列挙）
+# 用法: loop-gate <issue-number>
+#       loop-gate --body-file <path> [--dep-state N=CLOSED]...
+set -uo pipefail
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export LOOP_DIR="${LOOP_DIR:-$(cd "$SELF_DIR/.." && pwd)}"
+exec node "$SELF_DIR/../lib/gate-cli.mjs" "$@"

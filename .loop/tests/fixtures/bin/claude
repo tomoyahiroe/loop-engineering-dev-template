@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# テスト用の claude スタブ。受け取った引数を 1 行ずつ出力して 0 で終わる
+set -uo pipefail
+for arg in "$@"; do
+  printf 'ARG: %s\n' "$arg"
+done
+exit 0

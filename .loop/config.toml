@@ -1,0 +1,49 @@
+# このファイルはあなたのもの。テンプレート同期で上書きされない。
+# 全キーと説明は .loop/defaults.toml を見る。
+
+maturity = "L2"
+
+[models]
+maker = "claude-sonnet-5"
+verifier = "claude-sonnet-5"
+
+[budget]
+daily_tokens = 120000000
+
+[schedule]
+firings_per_day = 12
+timezone = "Asia/Tokyo"
+
+[loop]
+max_open_prs = 4
+max_dispatch_per_day = 10
+auto_fix_rounds = 1
+
+[gate]
+max_files_touched = 8
+max_acceptance_criteria = 6
+
+# ここは必ず自分のプロジェクトに合わせて書き換える。
+# test / lint を実際のコマンドにしたら、下の [agents.claude] extra_tools にも
+# そのコマンドの実行許可を必ず足すこと（足さないと dispatch が拒否されます）
+[project]
+test = "echo 'project.test を設定してください' && false"
+lint = "echo 'project.lint を設定してください' && false"
+preview = ""
+preview_port = 3000
+
+[mtg]
+voice = false
+
+[agents.claude]
+# Maker/Verifier/Fixer に許可する追加コマンド（プロジェクトのツールチェーン）。
+#
+# **[project] の test / lint とセットで必ず設定する。** 既定の許可リストは
+# git / gh しか含まないので、ここが空のままだと Verifier はテストを 1 つも
+# 実行できず、diff を読むだけでレビューすることになる（品質ゲートが静かに
+# 無効化される）。それを防ぐため、test / lint が設定されているのにここが
+# 空の場合、dispatch-maker / dispatch-verifier / dispatch-fixer は起動を
+# 拒否します。
+#
+# 例: extra_tools = ["Bash(pnpm:*)", "Bash(npx:*)", "Bash(node:*)"]
+extra_tools = []

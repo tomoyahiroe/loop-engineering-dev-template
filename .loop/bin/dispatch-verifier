@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# Verifier を headless 起動する（まっさらなコンテキスト）。
+# 実行結果は自分で loops/STATE.md に記録する（呼び出し側は || true で受けてよい）
+# 用法: dispatch-verifier <pr-number>
+set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
+BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$REPO_ROOT" || exit 1
+
+PR="${1:-}"
+[ -n "$PR" ] || { echo "用法: dispatch-verifier <pr-number>" >&2; exit 2; }
+
+MATURITY="$(cfg maturity)"
+if [ "$MATURITY" = "L1" ]; then
+  echo "REFUSED: maturity=L1（報告のみ）"
+  exit 1
+fi
+
+# {{TEST_CMD}} / {{LINT_CMD}} を実行できないまま Verifier を起動すると、
+# diff を読むだけの「テストを 1 つも走らせないレビュー」になる。それは
+# このハーネスの主要な品質シグナルが静かに無効化された状態なので、
+# 起動を拒否する（ローカルな設定を読むだけなので budget-check より先）
+require_project_tools_allowed || exit 1
+
+GATE_RC=0
+GATE="$("$BIN_DIR/budget-check")" || GATE_RC=$?
+echo "$GATE"
+if [ "$GATE_RC" -ne 0 ]; then
+  record_state "verifier pr-$PR スキップ ($(echo "$GATE" | grep '^SKIP' | head -1))"
+  exit 1
+fi
+
+WT="$REPO_ROOT/../$(basename "$REPO_ROOT")-verify-pr-$PR"
+
+# パスが既に存在するのは、大抵の場合 git worktree add 自体のバグではなく
+# 「別の起動がこの PR を既に検証中（またはその残骸）」という良性のレース。
+# git のエラーメッセージ文字列に頼って事後判定するより、事前にパスの有無だけで
+# 判定する方が git のバージョン差にも強い（dispatch-maker の「既に in-flight」
+# チェックと同じ考え方）。ここではまだ何も作っておらず trap も未 install なので、
+# そのまま exit すれば他の起動が使っている（かもしれない）ディレクトリには
+# 一切触れない。STATE.md は人間が毎朝読む一次情報なので、ここを FAILED と
+# 書くと本物のエラーと区別がつかず「FAILED は無視してよい」学習を招く。
+# 良性のレースだと分かっている場合は SKIPPED として exit 0 にする。
+if [ -e "$WT" ]; then
+  # 第 2 引数の 1 = 「マーカーが壊れていて判断できないなら所有されていない扱い」。
+  # ここで cleanup-merged と同じ既定（触らない側）にすると、壊れたマーカー
+  # 1 つでこの PR の検証が毎 tick SKIP され、二度と行われなくなる。
+  # 使い捨ての検証用 worktree を作り直す代償は小さいので、逆側に倒す
+  if worktree_is_claimed "verify-pr-$PR" 1; then
+    # 生きた所有者がいる = 本当に別の起動が検証中。良性のレースなので
+    # SKIPPED（exit 0）で、そのディレクトリには一切触れない
+    record_state "verifier pr-$PR SKIPPED (既に検証中: $WT)"
+    echo "SKIP: pr-$PR の検証用 worktree は既に使用中（他の起動と競合）"
+    exit 0
+  fi
+  # 所有者がいない（マーカーが無い、または PID が死んでいる）= 前回の起動が
+  # SIGKILL 等で落ちて残した残骸。この worktree は使い捨ての detached
+  # checkout であり、正常終了時は必ず trap で消される類のもの。
+  # 誰も所有していないなら引き取って作り直す。放置すると、この PR の検証は
+  # 二度と行われない（cleanup-merged は detached worktree を対象にせず、
+  # preview stop は preview パスしか見ないので、他に誰も片付けない）。
+  #
+  # git worktree remove を使い、rm -rf はしない。登録済みの worktree でない
+  # ものは remove が拒否するので、人間が同名のディレクトリを置いていた場合に
+  # それを消してしまうことがない（その場合は従来どおり SKIP して人間に委ねる）
+  if git worktree remove --force "$WT" >/dev/null 2>&1; then
+    git worktree prune >/dev/null 2>&1 || true
+    release_worktree "verify-pr-$PR"
+    record_state "verifier pr-$PR 所有者のいない検証用 worktree を引き取った ($WT)"
+  else
+    record_state "verifier pr-$PR SKIPPED (検証用 worktree を引き取れない。人間が確認して削除: $WT)"
+    echo "SKIP: pr-$PR の検証用 worktree を引き取れない: $WT"
+    exit 0
+  fi
+fi
+
+git worktree add --detach "$WT" main >/dev/null 2>&1 || {
+  record_state "verifier pr-$PR FAILED (worktree 作成に失敗)"
+  exit 1
+}
+
+# ここで PROMPT を確保してから、worktree 削除とあわせて 1 本の trap にまとめる。
+# trap ... EXIT は呼ぶたびに前回分を丸ごと上書きする（追加登録ではない）ので、
+# 後段で「PROMPT 用の trap」を別途 install すると、この worktree 削除が
+# 静かに消える。PROMPT は空文字であっても代入自体は成功するので（$(mktemp) が
+# 万一失敗しても PROMPT は未定義にはならない）、trap 内で set -u に触れて
+# 丸ごと落ちる心配もない。
+#
+# 検証中はこの worktree の所有権を主張する。これが無いと、SIGKILL で残った
+# 残骸と「別の起動が今まさに使っている worktree」を区別できず、上のパス存在
+# チェックがどちらも一律に SKIP になってしまう（= その PR の検証が永久に
+# 行われなくなる）
+claim_worktree "verify-pr-$PR"
+
+PROMPT="$(mktemp)"
+trap 'release_worktree "verify-pr-$PR"; rm -f "${PROMPT:-}"; git -C "$REPO_ROOT" worktree remove --force "$WT" >/dev/null 2>&1; git -C "$REPO_ROOT" worktree prune >/dev/null 2>&1' EXIT
+
+# --detach は必須。PR の head ブランチは Maker の worktree が保持しており、
+# git は同一ブランチの二重 checkout を拒否する
+( cd "$WT" && gh pr checkout "$PR" --detach ) || {
+  record_state "verifier pr-$PR FAILED (gh pr checkout)"
+  exit 1
+}
+
+render_prompt "$LOOP_DIR/prompts/verifier.md" \
+  "PR=$PR" \
+  "TEST_CMD=$(cfg project.test || echo '')" \
+  "LINT_CMD=$(cfg project.lint || echo '')" > "$PROMPT"
+
+LOG="loops/runs/$(date +%Y-%m-%d)-verifier-pr-$PR.md"
+
+# $1 = 書き込み先のログパス。agent-run --log は非追記の tee なので、呼び出しごとに
+# 別パスを渡さないと前回の内容が消える（リトライ時に「1 回目がなぜ失敗したか」の
+# 記録を残すため、下のリトライ経路では別名の $RETRY_LOG を渡す）
+run_verifier() {
+  "$BIN_DIR/agent-run" --role verifier --prompt-file "$PROMPT" --cwd "$WT" --log "$1"
+}
+
+RC=0
+run_verifier "$LOG" || RC=$?
+
+if [ "$RC" -ne 0 ] && is_transient_error "$LOG"; then
+  DELAY="$(retry_delay)"
+  record_state "verifier pr-$PR 一過性エラー — ${DELAY}s 後に 1 回リトライ (1 回目のログ: $LOG)"
+  sleep "$DELAY"
+  # 1 回目のログは上書きせず残す。以降 $LOG は最終試行（= 実際に採用された
+  # 結果）のログを指すよう付け替える
+  RETRY_LOG="${LOG%.md}.retry.md"
+  RC=0
+  run_verifier "$RETRY_LOG" || RC=$?
+  LOG="$RETRY_LOG"
+fi
+
+if [ "$RC" -ne 0 ]; then
+  record_state "verifier pr-$PR FAILED rc=$RC (log: $LOG)"
+  echo "verifier FAILED rc=$RC -> $LOG"
+  exit 1
+fi
+
+record_state "verifier pr-$PR ok (log: $LOG)"
+echo "verifier done -> $LOG"

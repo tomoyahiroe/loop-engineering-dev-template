@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# 設定の読み出し口。defaults.toml を config.toml で上書きした結果を返す
+# 用法: loop-config get <dotted.key> | loop-config dump
+set -uo pipefail
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export LOOP_DIR="${LOOP_DIR:-$(cd "$SELF_DIR/.." && pwd)}"
+exec node "$SELF_DIR/../lib/config-cli.mjs" "$@"

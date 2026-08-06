@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# Verifier の指摘を Maker の worktree で修正し、Verifier を再実行する。
+# この worktree は Maker が使っていた「生きた作業」（PR の head ブランチを保持）
+# であり、dispatch-verifier の使い捨て worktree とは違う。このスクリプトは
+# worktree の作成も削除も一切行わない（既存のものをそのまま再利用するだけ）。
+# 用法: dispatch-fixer <pr-number> <issue-number> <round>
+set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
+BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$REPO_ROOT" || exit 1
+
+PR="${1:-}"; ISSUE="${2:-}"; ROUND="${3:-}"
+[ -n "$PR" ] && [ -n "$ISSUE" ] && [ -n "$ROUND" ] \
+  || { echo "用法: dispatch-fixer <pr-number> <issue-number> <round>" >&2; exit 2; }
+
+MATURITY="$(cfg maturity)"
+if [ "$MATURITY" = "L1" ]; then
+  echo "REFUSED: maturity=L1（報告のみ）"
+  exit 1
+fi
+
+# Fixer も {{TEST_CMD}} / {{LINT_CMD}} を緑にすることが完了条件なので、
+# 実行できないなら起動しない（dispatch-maker / dispatch-verifier と同じ）
+require_project_tools_allowed || exit 1
+
+WT="$REPO_ROOT/../$(basename "$REPO_ROOT")-issue-$ISSUE"
+
+# worktree の有無はローカルな存在確認だけで完結する安価な処理なので、
+# budget-check（ccusage を叩く高価な処理）より先に行う。dispatch-maker の
+# 冪等性チェックと同じ理由に加え、ここでは「worktree がない」は予算とは
+# 無関係の genuine failure（needs-human）。budget-check を先に走らせると、
+# 予算を使い切っている日には本当の原因（worktree 消失）が「SKIP: 予算ゲート」
+# に化けて隠れてしまい、needs-human ラベルも付かないまま放置されかねない。
+if [ ! -d "$WT" ]; then
+  record_state "fixer pr-$PR r$ROUND 起動できない (worktree $WT がない) — needs-human"
+  gh issue edit "$ISSUE" --add-label needs-human >/dev/null 2>&1 || true
+  echo "FAILED: worktree がない: $WT"
+  exit 1
+fi
+
+# WT は "$REPO_ROOT/../xxx" のように .. を含んだ文字列のままだと、-d や cd
+# は OS が解決するので動作はするものの、agent-run に渡した --cwd がログに
+# そのまま出力されたときに人間が見て分かりにくい文字面になる。存在確認が
+# 済んだ時点で一度だけ正規化しておく
+RESOLVED_WT="$(cd "$WT" && pwd)" || {
+  record_state "fixer pr-$PR r$ROUND FAILED (worktree パス解決に失敗: $WT)"
+  gh issue edit "$ISSUE" --add-label needs-human >/dev/null 2>&1 || true
+  echo "FAILED: worktree パス解決に失敗: $WT"
+  exit 1
+}
+WT="$RESOLVED_WT"
+
+GATE_RC=0
+GATE="$("$BIN_DIR/budget-check")" || GATE_RC=$?
+echo "$GATE"
+if [ "$GATE_RC" -ne 0 ]; then
+  record_state "fixer pr-$PR r$ROUND スキップ ($(echo "$GATE" | grep '^SKIP' | head -1))"
+  exit 1
+fi
+
+# Maker の worktree をそのまま借りて動くので、実行中は所有権を主張する
+# （PR が squash merge された直後などに、並行する cleanup-merged が
+# 「取り込み済み」と判定してこの worktree を消してしまうのを防ぐ）。
+# trap は dispatch-maker と同じ理由で 1 本にまとめる
+claim_worktree "issue-$ISSUE"
+trap 'release_worktree "issue-$ISSUE"; rm -f "${PROMPT:-}"' EXIT
+
+PROMPT="$(mktemp)"
+render_prompt "$LOOP_DIR/prompts/fixer.md" \
+  "PR=$PR" "ISSUE=$ISSUE" "ROUND=$ROUND" \
+  "TEST_CMD=$(cfg project.test || echo '')" \
+  "LINT_CMD=$(cfg project.lint || echo '')" > "$PROMPT"
+
+# ラウンド数を別に持つカウンタは存在しない。このログファイル名の r$ROUND が
+# 「実施済みラウンド」の唯一の記録であり、firing はこのファイルを（日付に
+# 関わらず PR 番号で）数えて次のラウンドを許可するか判断する。
+# 日付はログの整理のために付けているだけで、計数の単位ではない。
+# agent-run --log は tee 経由でまず
+# ファイルを作ってから書き込むため、エージェントが失敗して RC!=0 になっても
+# このログファイル自体は残る＝失敗したラウンドも 1 回として数えられる。
+# これは意図した挙動: 予算を消費した試行はラウンドを消費したとみなすべきで、
+# 失敗するたびにノーカウントでやり直せてしまうと auto_fix_rounds の上限が
+# 意味を失う
+LOG="loops/runs/$(date +%Y-%m-%d)-fixer-pr-$PR-r$ROUND.md"
+
+RC=0
+"$BIN_DIR/agent-run" --role fixer --prompt-file "$PROMPT" --cwd "$WT" --log "$LOG" || RC=$?
+
+if [ "$RC" -ne 0 ]; then
+  record_state "fixer pr-$PR r$ROUND FAILED rc=$RC (log: $LOG)"
+  gh issue edit "$ISSUE" --add-label needs-human >/dev/null 2>&1 || true
+  echo "fixer FAILED rc=$RC -> $LOG"
+  exit 1
+fi
+
+record_state "fixer pr-$PR r$ROUND ok (log: $LOG)"
+echo "fixer done -> $LOG"
+
+if [ "${LOOP_SKIP_VERIFIER:-0}" = "1" ]; then
+  exit 0
+fi
+echo "chain: dispatch-verifier for PR #$PR (再検証)"
+"$BIN_DIR/dispatch-verifier" "$PR" || true

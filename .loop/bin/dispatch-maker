@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# Maker を headless 起動する。PR ができたら Verifier をチェーンする。
+# 用法: dispatch-maker <issue-number>
+set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
+BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$REPO_ROOT" || exit 1
+
+ISSUE="${1:-}"
+[ -n "$ISSUE" ] || { echo "用法: dispatch-maker <issue-number>" >&2; exit 2; }
+
+MATURITY="$(cfg maturity)"
+if [ "$MATURITY" = "L1" ]; then
+  echo "REFUSED: maturity=L1（報告のみ）。昇格は .loop/config.toml を人間が編集して行う"
+  exit 1
+fi
+
+WT="$REPO_ROOT/../$(basename "$REPO_ROOT")-issue-$ISSUE"
+BRANCH="loop/issue-$ISSUE"
+
+# 冪等性チェックはローカルな worktree/branch の存在確認だけで完結する安価な処理
+# なので、budget-check（ccusage を叩く高価な処理）より先に行う。
+# 理由は 2 つ:
+#   1. 既に in-flight は「正常な skip」であり exit 0 で報告すべきもの。
+#      これを budget-check より後にすると、予算を使い切っている日には
+#      in-flight でも exit 1「SKIP: 予算ゲート」に化けてしまい、
+#      呼び出し元/監視に偽の失敗として見えてしまう
+#   2. 何もしない tick のたびに ccusage を叩くのは無駄なコスト
+SKIP_MARKER="loops/.inflight-skip-$ISSUE"
+if [ -d "$WT" ] || git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+  # 記録は「この Issue につき 1 回」に抑える（gate-remediation・L3 merge 失敗と
+  # 同じローカルマーカー方式）。判定材料を GitHub 側の状態ではなくローカル
+  # ファイルに持つ理由も同じ: gh が落ちているときこそ誤判定してはいけない
+  if [ ! -f "$SKIP_MARKER" ]; then
+    record_state "maker issue-$ISSUE SKIPPED (既に in-flight: worktree/branch が存在)"
+    touch "$SKIP_MARKER" 2>/dev/null || true
+  fi
+  echo "SKIP: issue-$ISSUE は既に in-flight"
+
+  # firing は毎 tick min(loop:ready) を選ぶので、ここで loop:ready が付いた
+  # ままだと、この Issue が永久に先頭に居座り、後ろの ready な Issue が
+  # 1 件も dispatch されない（待ち行列全体が止まる）。除去は dispatch 時に
+  # best-effort で 1 回試みているだけなので、gh の一過性エラーや人間の
+  # re-label で簡単に元に戻る。ここで諦めずに剥がし直すのが唯一の自己修復
+  # 手段（firing の gate-remediation が同じことをしている）。
+  # 「リトライを止める操作は最後の一手」の原則どおり、記録より後に置く
+  gh issue edit "$ISSUE" --remove-label loop:ready >/dev/null 2>&1 || true
+  exit 0
+fi
+# ここに来た = in-flight ではない。過去のスキップ記録はもう有効ではないので
+# 片付ける（次に詰まったときにまた 1 回記録できるようにするため）
+rm -f "$SKIP_MARKER" 2>/dev/null || true
+
+# ツール許可の確認も、ローカルな設定を読むだけの安価な処理なので
+# budget-check より先に置く。in-flight チェックより後なのは、既に走っている
+# 実行の loop:ready を剥がし直す自己修復（上の skip 分岐）を、設定ミスで
+# 止めてしまわないため
+require_project_tools_allowed || exit 1
+
+"$BIN_DIR/budget-check" || { echo "SKIP: 予算ゲート"; exit 1; }
+
+git worktree add "$WT" -b "$BRANCH" main || {
+  record_state "maker issue-$ISSUE FAILED (worktree 作成に失敗)"
+  exit 1
+}
+
+# 実行中はこの worktree の所有権を主張する。まだ 1 度もコミットしていない
+# 段階では branch は main と同一・作業ツリーはクリーンなので、cleanup-merged
+# から見ると「取り込み済みの残骸」と完全に同じ姿になる。並行する firing が
+# 走ればその場で worktree ごと消され、Maker は実行中に足元を失う
+# （turns.maker = 120 の実行は発火間隔を超え得るので現実に起きる）。
+#
+# trap は 1 本にまとめる。trap ... EXIT は呼ぶたびに前回分を丸ごと上書き
+# する（追加登録ではない）ので、後段で PROMPT 用の trap を別に install すると
+# この release が静かに消える。PROMPT はこの時点ではまだ未定義なので
+# ${PROMPT:-} で参照する（set -u 対策）
+claim_worktree "issue-$ISSUE"
+trap 'release_worktree "issue-$ISSUE"; rm -f "${PROMPT:-}"' EXIT
+
+gh issue edit "$ISSUE" --remove-label loop:ready >/dev/null 2>&1 || true
+
+PROMPT="$(mktemp)"
+render_prompt "$LOOP_DIR/prompts/maker.md" \
+  "ISSUE=$ISSUE" \
+  "TEST_CMD=$(cfg project.test || echo '')" \
+  "LINT_CMD=$(cfg project.lint || echo '')" > "$PROMPT"
+
+LOG="loops/runs/$(date +%Y-%m-%d)-maker-issue-$ISSUE.md"
+
+# $1 = 書き込み先のログパス。agent-run --log は非追記の tee なので、呼び出しごとに
+# 別パスを渡さないと前回の内容が消える（リトライ時に「1 回目がなぜ失敗したか」の
+# 記録を残すため、下のリトライ経路では別名の $RETRY_LOG を渡す）
+run_maker() {
+  "$BIN_DIR/agent-run" --role maker --prompt-file "$PROMPT" --cwd "$WT" --log "$1"
+}
+
+RC=0
+run_maker "$LOG" || RC=$?
+
+# 一過性エラーは 1 回だけ自動リトライ。worktree が手つかず（未コミット変更なし・
+# main から進んでいない）のときだけ。作業途中で死んだ WIP は残置して人間が確認する
+if [ "$RC" -ne 0 ] && is_transient_error "$LOG" \
+   && [ -z "$(git -C "$WT" status --porcelain)" ] \
+   && [ "$(git -C "$WT" rev-parse HEAD)" = "$(git rev-parse main)" ]; then
+  DELAY="$(retry_delay)"
+  record_state "maker issue-$ISSUE 一過性エラー — ${DELAY}s 後に 1 回リトライ (1 回目のログ: $LOG)"
+  sleep "$DELAY"
+  # 1 回目のログは上書きせず残す。以降 $LOG は最終試行（= 実際に採用された
+  # 結果）のログを指すよう付け替える
+  RETRY_LOG="${LOG%.md}.retry.md"
+  RC=0
+  run_maker "$RETRY_LOG" || RC=$?
+  LOG="$RETRY_LOG"
+fi
+
+if [ "$RC" -ne 0 ]; then
+  record_state "maker issue-$ISSUE FAILED rc=$RC (log: $LOG)"
+  gh issue edit "$ISSUE" --add-label needs-human >/dev/null 2>&1 || true
+  # 変数展開の直後に全角文字を置くときは必ず ${} で括る。$LOG（ と書くと
+  # bash（3.2 / 5.x とも、UTF-8 ロケール）は全角括弧を変数名の一部として
+  # 読み、set -u 下で "unbound variable" になってこの行が実行されない
+  echo "maker FAILED rc=$RC -> ${LOG}（worktree ${WT} は残置。人間が WIP を確認する）"
+  exit 1
+fi
+
+# --jq には依存しない（gh のビルドによっては使えないため）。firing と同じく node で取り出す
+PR="$(gh pr list --head "$BRANCH" --state open --json number,headRefName 2>/dev/null \
+  | node -e "
+let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{
+  try{const a=JSON.parse(s);
+    const hit=a.find(p=>String(p.headRefName)==='$BRANCH')||a[0];
+    process.stdout.write(hit&&hit.number?String(hit.number):'');}
+  catch{process.stdout.write('')}})")"
+
+if [ -z "$PR" ]; then
+  record_state "maker issue-$ISSUE 完了したが PR なし (log: $LOG)"
+  gh issue edit "$ISSUE" --add-label needs-human >/dev/null 2>&1 || true
+  echo "maker done (PR なし) -> $LOG"
+  exit 0
+fi
+
+record_state "maker issue-$ISSUE ok -> PR #$PR (log: $LOG)"
+echo "maker done -> $LOG / PR #$PR"
+
+if [ "${LOOP_SKIP_VERIFIER:-0}" = "1" ]; then
+  exit 0
+fi
+echo "chain: dispatch-verifier for PR #$PR"
+"$BIN_DIR/dispatch-verifier" "$PR" || true

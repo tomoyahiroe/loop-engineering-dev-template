@@ -1,0 +1,11 @@
+node_modules/
+loops/.preview.pid
+loops/.preview.meta
+loops/runs/*.log
+loops/.gate-failed-*
+loops/.merge-failed-*
+loops/.tools-misconfig
+loops/.inflight-skip-*
+loops/.fix-exhausted-*
+loops/.wt-owner-*
+.DS_Store

@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# 予算ゲート（fail-closed）。0 = 実行可 / 1 = スキップ
+# 使用量が取れない・解析できない・数値でない・比較そのものが成功しない場合は
+# すべて「使い切ったものとして扱う」。
+#
+# 設計原則: exit 0 に到達できる経路は 1 つだけにする。
+# VERDICT を "skip" で初期化し、"検証済みの非負整数同士の比較が明確に
+# under だった" と確定した場合にのみ "under" へ上書きする。他のあらゆる
+# 分岐（値が取れない・数値でない・桁が大きすぎる・比較自体が失敗する等）は
+# VERDICT を書き換えずに skip のまま終わる。
+set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
+
+# 非負整数かつ「桁数が安全な範囲内」かを判定する（bash 3.2 互換、[[ =~ ]] は
+# 使わない）。
+#
+# なぜ桁数まで見るか: `[ "$x" -ge "$y" ]` は非数値だけでなく、桁あふれ
+# （bash の符号付き整数比較が扱える範囲を超える値）でも stderr に
+# "integer expression expected" を出しつつ終了コード 2 を返す。if による
+# 「0 か非 0 か」の二値判定だけでは、この「比較不能エラー(2)」と「比較が
+# 成功して false だった(1)」を区別できず、set -e でもないため素通りして
+# fail-open してしまう（このバグを一度実際に踏んだ: totalTokens に 20 桁の
+# 数値を渡すと USED が桁あふれし、比較なしで exit 0 に落ちた）。
+#
+# 桁数の上限は 15 桁（10^15 未満）に固定する。現実的なトークン使用量/上限を
+# 何桁も超える余裕があり、かつ意図的に sum-usage.mjs 側の
+# Number.isSafeInteger の上限（2^53-1 ≒ 16 桁）より一段厳しくしてある。
+# これにより「mjs 側の検証は通るが is_uint には拒否される」入力が存在し、
+# is_uint が単独でも（mjs 側の検証結果に頼らず）効いていることをテストで
+# 直接確認できる。
+is_uint() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "${#1}" -le 15 ]
+}
+
+LIMIT="$(cfg budget.daily_tokens)" || { echo "SKIP: budget.daily_tokens が未設定（fail-closed）"; exit 1; }
+is_uint "$LIMIT" || { echo "SKIP: budget.daily_tokens が数値として不正、または大きすぎる（fail-closed）"; exit 1; }
+
+TODAY="$(date +%Y%m%d)"
+CCUSAGE="${LOOP_CCUSAGE_CMD:-npx --yes ccusage@latest}"
+
+RAW="$($CCUSAGE daily --json --since "$TODAY" --until "$TODAY" 2>/dev/null)" \
+  || { echo "SKIP: 使用量を取得できない（fail-closed）"; exit 1; }
+
+USED="$(printf '%s' "$RAW" | node "$LIB_DIR/sum-usage.mjs")" \
+  || { echo "SKIP: 使用量を解析できない（fail-closed）"; exit 1; }
+is_uint "$USED" || { echo "SKIP: 使用量が数値として不正、または大きすぎる（fail-closed）"; exit 1; }
+
+echo "BUDGET: used=$USED limit=$LIMIT"
+
+# 比較を明示的に実行し、生の終了コードで分岐する（if の 0/非0 の二値判定に
+# 潰さない）。[ -ge ] の終了コードは 0=true(over) / 1=false(under) /
+# 2 以上=比較エラー の 3 通りがあり得る。ここで拾わずに if に渡すと 1 と
+# 2 以上が「偽」に丸められて区別できなくなる。
+VERDICT="skip"
+[ "$USED" -ge "$LIMIT" ]
+cmp_rc=$?
+if [ "$cmp_rc" -eq 0 ]; then
+  VERDICT="over"
+elif [ "$cmp_rc" -eq 1 ]; then
+  VERDICT="under"
+fi
+# cmp_rc がそれ以外（2 以上）なら VERDICT は初期値の "skip" のまま残る。
+
+case "$VERDICT" in
+  under) exit 0 ;;
+  over)  echo "SKIP: 本日のトークン予算を使い切った"; exit 1 ;;
+  *)     echo "SKIP: 予算の比較に失敗した（fail-closed）"; exit 1 ;;
+esac
