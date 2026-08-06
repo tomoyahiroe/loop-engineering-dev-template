@@ -104,7 +104,17 @@ open PR ごとに、この順で扱う:
 
 1. 議事録を `loops/mtg/YYYY-MM-DD.md` に保存（`## 決定` / `## 保留` / `## 作成 Issue`）
 2. `loops/STATE.md` の Now / Next を更新
-3. `git add loops/ && git commit -m "loop: mtg YYYY-MM-DD"`
+3. `git add loops/ && git commit -m "loop: mtg YYYY-MM-DD" && git push origin main`
+
+   **push まで必ず行う。** `dispatch-maker` は**ローカルの** `main` から
+   ブランチを切るので、commit したまま push しないと、この議事録コミットが
+   その日に作られる**すべての PR の diff に混ざる**。`maker.md` は Maker に
+   `loops/` の編集を禁じており、Verifier は Issue の「スコープ外」に手が
+   入っていないかを diff で確認するため、Maker のせいではない変更で
+   request-changes が出る。
+
+   push が失敗した場合（branch protection・認証切れなど）は、その場で
+   ユーザーに報告して指示を仰ぐ。**黙って次へ進まない。**
 4. 次の firing で何が起きるかを 1 行で予告する（`.loop/bin/firing --dry-run` の結果）
 
 ## 禁止
