@@ -15,6 +15,11 @@ teardown() {
   # テストが assertion 失敗で早期リターンしても、起動しっぱなしの
   # バックグラウンドプロセスと worktree を必ず片付ける
   "$LOOP_REAL_DIR/bin/preview" stop >/dev/null 2>&1 || true
+  # pgid フォールバックのテストが作る「PID ファイルには載らないグループ
+  # リーダー」用の後始末。他のテストではこのファイルは存在しないので no-op
+  if [ -f "$TMP/leader.pid" ]; then
+    kill -9 "$(cat "$TMP/leader.pid")" 2>/dev/null || true
+  fi
   cleanup_test_repo
   rm -rf "$TMP"
 }
@@ -127,4 +132,61 @@ EOF
   [ ! -d "$WT" ]
   run git -C "$REPO_ROOT" worktree list --porcelain
   [[ "$output" != *"preview-pr-7"* ]]
+}
+
+# --- Fix round 1（コーディネーターレビュー対応）で追加した 2 本 ---
+
+@test "main 起動中に pr を実行すると worktree を作らずに拒否する（起動中チェックが worktree 作成より先）" {
+  use_gh_stub
+  "$LOOP_REAL_DIR/bin/preview" main
+  run "$LOOP_REAL_DIR/bin/preview" pr 9
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"既に起動"* ]]
+  WT="$TMP/repo-preview-pr-9"
+  [ ! -d "$WT" ]
+  run git -C "$REPO_ROOT" worktree list --porcelain
+  [[ "$output" != *"preview-pr-9"* ]]
+}
+
+@test "pid が自分自身のグループリーダーでなければ単発 kill にとどめ、同じグループの他プロセスは巻き込まない" {
+  # 自前でプロセスグループを作る。LEADER がグループリーダー（pgid=自分の pid）、
+  # CHILD はその中で fork された非リーダー（pgid=LEADER の pid、CHILD 自身の
+  # pid とは一致しない）。PID ファイルには CHILD の pid だけを書き込み、
+  # 「pid ファイルが指すプロセスは実在するが、そのプロセスグループの
+  # リーダーではない」状況（pid 再利用や外部要因で pid ファイルの中身が
+  # preview 自身の起動対象とズレたケースを模す）を再現する。
+  # LEADER は CHILD の生死と無関係に一定時間生き続けるようにし
+  # （CHILD を待たない）、CHILD だけを先に消してもテストが安定するようにする。
+  set -m
+  ( sleep 4 & echo $! > "$TMP/group-child.pid"; sleep 4 ) &
+  LEADER_PID=$!
+  set +m
+  echo "$LEADER_PID" > "$TMP/leader.pid"  # 失敗時も teardown が必ず片付けられるように
+
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -f "$TMP/group-child.pid" ] && break
+    sleep 0.2
+  done
+  [ -f "$TMP/group-child.pid" ]
+  CHILD_PID="$(cat "$TMP/group-child.pid")"
+
+  # 前提: CHILD は生きているが、自分自身のグループリーダーではない
+  kill -0 "$CHILD_PID"
+  kill -0 "$LEADER_PID"
+  PGID_OF_CHILD="$(ps -o pgid= -p "$CHILD_PID" | tr -d ' ')"
+  [ "$PGID_OF_CHILD" != "$CHILD_PID" ]
+  [ "$PGID_OF_CHILD" = "$LEADER_PID" ]
+
+  echo "$CHILD_PID" > "$REPO_ROOT/loops/.preview.pid"
+  printf 'main http://localhost:4321\n' > "$REPO_ROOT/loops/.preview.meta"
+
+  run "$LOOP_REAL_DIR/bin/preview" stop
+  [ "$status" -eq 0 ]
+
+  # 単発 kill で CHILD 自体は止まっている
+  run kill -0 "$CHILD_PID"
+  [ "$status" -ne 0 ]
+  # しかし同じグループの LEADER（sibling）は無事
+  # （プロセスグループ全体を巻き込んでいたら道連れで死んでいるはず）
+  kill -0 "$LEADER_PID"
 }

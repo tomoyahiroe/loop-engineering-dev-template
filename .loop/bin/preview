@@ -31,17 +31,28 @@ is_running() {
   kill -0 "$pid" 2>/dev/null
 }
 
-start_in() { # $1 = 作業ディレクトリ, $2 = 説明
-  local dir="$1" what="$2" cmd port pid
+# start_in を呼ぶ前に「起動してよい状態か」だけを副作用なしで確認する。
+# pr サブコマンドが worktree を作る前にもこれを呼ぶ必要がある。ここを
+# 通さずに worktree を先に作ってしまうと、既に起動中で start_in が
+# 中断したときに detached worktree（cleanup-merged の対象外なので
+# preview stop でしか消せない）を作りっぱなしのまま残してしまう。
+require_can_start() {
+  local cmd
   cmd="$(cfg project.preview || echo '')"
   if [ -z "$cmd" ]; then
     echo "SKIP: project.preview が未設定です（.loop/config.toml に書いてください）"
-    exit 1
+    return 1
   fi
   if is_running; then
     echo "既に起動しています（$(cat "$META_FILE" 2>/dev/null)）。先に preview stop してください"
-    exit 1
+    return 1
   fi
+}
+
+start_in() { # $1 = 作業ディレクトリ, $2 = 説明
+  local dir="$1" what="$2" cmd port pid
+  require_can_start || exit 1
+  cmd="$(cfg project.preview || echo '')"
   port="$(cfg project.preview_port || echo 3000)"
   mkdir -p "$REPO_ROOT/loops/runs"
   # ジョブコントロール（set -m）を使い、起動したコマンドを新しい
@@ -72,6 +83,9 @@ case "${1:-}" in
   pr)
     PR="${2:-}"
     [ -n "$PR" ] || { echo "用法: preview pr <N>" >&2; exit 2; }
+    # worktree を作る前に、起動できる状態かを確認する（副作用を始める前に
+    # 中断条件を確認する。理由は require_can_start のコメントを参照）
+    require_can_start || exit 1
     WT="$REPO_ROOT/../$(basename "$REPO_ROOT")-preview-pr-$PR"
     if [ ! -d "$WT" ]; then
       git worktree add --detach "$WT" main >/dev/null 2>&1 || {
@@ -83,6 +97,7 @@ case "${1:-}" in
     start_in "$WT" "PR #$PR"
     ;;
   stop)
+    STOP_FAILED=0
     if is_running; then
       PID="$(cat "$PID_FILE")"
       # 自分（start_in）が起動したジョブなら、プロセスグループのリーダー
@@ -104,8 +119,22 @@ case "${1:-}" in
         sleep 1
         kill -9 "$PID" 2>/dev/null || true
       fi
+      # SIGKILL 直後は一瞬 zombie 状態で kill -0 がまだ成功することがある
+      # （実機で確認済み）ので、少し待ってから最終確認する。ここで
+      # 確認せずに rm -f して「停止しました」と報告すると、実際にはまだ
+      # 生きている（＝ポートを握ったままの）プロセスを見失う（pid ファイル
+      # が消えるので is_running は以後 STOPPED を返すが、実プロセスは
+      # 残ったまま）ことになりかねない。
+      sleep 0.3
+      if kill -0 "$PID" 2>/dev/null; then
+        STOP_FAILED=1
+      fi
     fi
-    rm -f "$PID_FILE" "$META_FILE"
+    if [ "$STOP_FAILED" -eq 1 ]; then
+      echo "停止に失敗しました: プロセス（pid $PID）がまだ残っている可能性があります" >&2
+    else
+      rm -f "$PID_FILE" "$META_FILE"
+    fi
     # PR プレビュー用の worktree を片付ける（detached HEAD のため
     # cleanup-merged の対象にならず、ここでしか消せない）
     while IFS= read -r line; do
@@ -115,6 +144,9 @@ case "${1:-}" in
       esac
     done < <(git worktree list --porcelain)
     git worktree prune >/dev/null 2>&1
+    if [ "$STOP_FAILED" -eq 1 ]; then
+      exit 1
+    fi
     echo "プレビューを停止しました"
     ;;
   status)
