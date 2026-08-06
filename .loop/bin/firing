@@ -38,7 +38,7 @@ let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
   try{const a=JSON.parse(s);const n=a.map(x=>x.number);
     process.stdout.write(n.length?String(Math.min(...n)):"");}catch{process.stdout.write("")}})')"
 
-PR_JSON="$(gh pr list --state open --json number,headRefName 2>/dev/null || echo '[]')"
+PR_JSON="$(gh pr list --state open --json number,headRefName,reviewDecision,labels 2>/dev/null || echo '[]')"
 N_OPEN="$(printf '%s' "$PR_JSON" | jnode '
 let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
   try{const a=JSON.parse(s);
@@ -53,6 +53,54 @@ MAXD="$(cfg loop.max_dispatch_per_day)"
 # しただけで 2 件と数えられ、max_dispatch_per_day を実際より早く使い切って
 # しまうので、.retry.md は数えない
 N_TODAY="$(ls "loops/runs/$DATE"-maker-issue-*.md 2>/dev/null | grep -v '\.retry\.md$' | wc -l | tr -d ' ')"
+
+# --- 2.5 request-changes の PR を最優先で Fixer に回す ---------------------
+# NEXT_ISSUE（新規 dispatch 候補）の有無に関わらず動く。既存 PR の fix chain は
+# 新規 Issue の着手可否とは独立した仕事であり、ready な Issue が無い tick でも
+# 止めてはいけない（そのため section 3 の「何もなければ黙って終わる」より前に置く）
+AUTO_FIX_ROUNDS="$(cfg loop.auto_fix_rounds)"
+if [ "$DRY" = 0 ] && [ "$MATURITY" != "L1" ] && [ "$AUTO_FIX_ROUNDS" -gt 0 ] 2>/dev/null; then
+  while IFS="$(printf '\t')" read -r FPR FISSUE; do
+    [ -n "$FPR" ] || continue
+    # ラウンド数を持つカウンタは存在しない。このログファイル名の r<N> こそが
+    # 「実施済みラウンド」の唯一の記録（dispatch-fixer 側のコメント参照）。
+    # glob は "-fixer-pr-<N>-r" というプレフィックスを固定しているので、
+    # dispatch-maker が書く *-maker-issue-<N>.retry.md のような無関係な
+    # ログとは衝突しない（N_TODAY の二重カウント事故の教訓を踏まえ、ここでも
+    # 意図的にプレフィックスを厳密にしている）
+    DONE_ROUNDS="$(ls "loops/runs/$DATE"-fixer-pr-"$FPR"-r*.md 2>/dev/null | wc -l | tr -d ' ')"
+    if [ "$DONE_ROUNDS" -ge "$AUTO_FIX_ROUNDS" ]; then
+      record_state "pr-$FPR 自動修正の上限 ($DONE_ROUNDS/$AUTO_FIX_ROUNDS) — needs-human"
+      gh issue edit "$FISSUE" --add-label needs-human >/dev/null 2>&1 || true
+      continue
+    fi
+    NEXT_ROUND=$((DONE_ROUNDS + 1))
+    echo "firing: dispatching fixer for PR #$FPR (round $NEXT_ROUND)"
+    "$BIN_DIR/dispatch-fixer" "$FPR" "$FISSUE" "$NEXT_ROUND" || true
+  done < <(printf '%s' "$PR_JSON" | node "$LIB_DIR/pr-triage.mjs" --mode needs-fix)
+fi
+
+# --- 2.6 L3: approve 済み かつ auto-merge ラベル付きの PR を merge ---------
+# merge は不可逆な最終手段なので、この if の外側では絶対に副作用を起こさない
+# （--dry-run はこの節に到達する前提自体を DRY=0 で塞いでいる）。
+# 個々の PR について「merge を試みる」こと自体が、このワークフローにおける
+# 「リトライを止める最後の一手」にあたる（merge が成功すれば PR は closed に
+# なり、次 tick の gh pr list --state open にはもう出てこなくなるので、
+# それ以上の自己修復操作は不要）。そのため record_state / echo は merge の
+# 成否を受けて後から報告するだけでよい
+if [ "$DRY" = 0 ] && [ "$MATURITY" = "L3" ]; then
+  AM_LABEL="$(cfg loop.auto_merge_label)"
+  while IFS="$(printf '\t')" read -r MPR MISSUE; do
+    [ -n "$MPR" ] || continue
+    if gh pr merge "$MPR" --squash --delete-branch >/dev/null 2>&1; then
+      record_state "L3 自動 merge: PR #$MPR (issue #$MISSUE)"
+      echo "firing: auto-merged PR #$MPR"
+    else
+      record_state "L3 自動 merge に失敗: PR #$MPR — needs-human"
+      gh issue edit "$MISSUE" --add-label needs-human >/dev/null 2>&1 || true
+    fi
+  done < <(printf '%s' "$PR_JSON" | node "$LIB_DIR/pr-triage.mjs" --mode auto-merge --label "$AM_LABEL")
+fi
 
 # --- 3. 何もすることがなければ静かに終わる ---------------------------------
 if [ -z "$NEXT_ISSUE" ]; then
