@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# スケジュール発火の唯一の入口。cron から呼ばれる。
+# 何もすることがなければ何も記録せず終了する（空回りゼロ）。
+# 用法: firing [--dry-run]
+set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
+BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$REPO_ROOT" || exit 1
+
+DRY=0
+[ "${1:-}" = "--dry-run" ] && DRY=1
+
+DATE="$(date +%Y-%m-%d)"
+MATURITY="$(cfg maturity)"
+
+# JSON から値を取り出す小さなヘルパー（jq に依存しない）
+jnode() { node -e "$1"; }
+
+# --- 0. origin/main 同期 ---------------------------------------------------
+if [ "$DRY" = 0 ] && [ "${LOOP_SKIP_FETCH:-0}" != "1" ]; then
+  git fetch origin >/dev/null 2>&1 || true
+  if git rev-parse --verify --quiet origin/main >/dev/null; then
+    if ! git merge --no-edit origin/main >/dev/null 2>&1; then
+      git merge --abort >/dev/null 2>&1 || true
+      record_state "firing 中止: origin/main とのコンフリクト"
+      exit 1
+    fi
+  fi
+fi
+
+# --- 1. マージ済み worktree の片付け ---------------------------------------
+[ "$DRY" = 0 ] && "$BIN_DIR/cleanup-merged" || true
+
+# --- 2. 状況の収集 ---------------------------------------------------------
+READY_JSON="$(gh issue list --label loop:ready --state open --json number 2>/dev/null || echo '[]')"
+NEXT_ISSUE="$(printf '%s' "$READY_JSON" | jnode '
+let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+  try{const a=JSON.parse(s);const n=a.map(x=>x.number);
+    process.stdout.write(n.length?String(Math.min(...n)):"");}catch{process.stdout.write("")}})')"
+
+PR_JSON="$(gh pr list --state open --json number,headRefName 2>/dev/null || echo '[]')"
+N_OPEN="$(printf '%s' "$PR_JSON" | jnode '
+let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+  try{const a=JSON.parse(s);
+    process.stdout.write(String(a.filter(p=>String(p.headRefName).startsWith("loop/issue-")).length));}
+  catch{process.stdout.write("999")}})')"
+
+MAX_PRS="$(cfg loop.max_open_prs)"
+MAXD="$(cfg loop.max_dispatch_per_day)"
+N_TODAY="$(ls "loops/runs/$DATE"-maker-issue-*.md 2>/dev/null | wc -l | tr -d ' ')"
+
+# --- 3. 何もすることがなければ静かに終わる ---------------------------------
+if [ -z "$NEXT_ISSUE" ]; then
+  [ "$DRY" = 1 ] && echo "DRY RUN: ready な Issue なし（何もしない）"
+  exit 0
+fi
+
+# --- 4. 上限チェック（fail-closed） ----------------------------------------
+if [ "$N_OPEN" -ge "$MAX_PRS" ]; then
+  MSG="dispatch スキップ #$NEXT_ISSUE (open PR 上限 $N_OPEN/$MAX_PRS)"
+  [ "$DRY" = 1 ] && { echo "DRY RUN: $MSG"; exit 0; }
+  record_state "$MSG"; exit 0
+fi
+if [ "$N_TODAY" -ge "$MAXD" ]; then
+  MSG="dispatch スキップ #$NEXT_ISSUE (本日の日次上限 $N_TODAY/$MAXD)"
+  [ "$DRY" = 1 ] && { echo "DRY RUN: $MSG"; exit 0; }
+  record_state "$MSG"; exit 0
+fi
+
+GATE_RC=0
+GATE_OUT="$("$BIN_DIR/budget-check")" || GATE_RC=$?
+if [ "$GATE_RC" -ne 0 ]; then
+  MSG="dispatch スキップ #$NEXT_ISSUE (予算: $(echo "$GATE_OUT" | grep '^SKIP' | head -1))"
+  [ "$DRY" = 1 ] && { echo "DRY RUN: $MSG"; exit 0; }
+  record_state "$MSG"; exit 0
+fi
+
+# --- 5. gate 再検証（Issue は MTG 後に編集されうる） ------------------------
+GRC=0
+GOUT="$("$BIN_DIR/loop-gate" "$NEXT_ISSUE" 2>&1)" || GRC=$?
+if [ "$GRC" -ne 0 ]; then
+  MSG="dispatch 中止 #$NEXT_ISSUE (gate 不合格。ready を剥がして needs-human)"
+  if [ "$DRY" = 1 ]; then echo "DRY RUN: $MSG"; echo "$GOUT"; exit 0; fi
+  gh issue edit "$NEXT_ISSUE" --remove-label loop:ready >/dev/null 2>&1 || true
+  gh issue edit "$NEXT_ISSUE" --add-label needs-human >/dev/null 2>&1 || true
+  gh issue comment "$NEXT_ISSUE" --body "loop-gate 不合格のため dispatch を中止しました。
+
+\`\`\`
+$GOUT
+\`\`\`"  >/dev/null 2>&1 || true
+  record_state "$MSG"
+  exit 0
+fi
+
+# --- 6. L1 は報告だけ ------------------------------------------------------
+if [ "$MATURITY" = "L1" ]; then
+  MSG="L1 (報告のみ): 今なら #$NEXT_ISSUE を dispatch する"
+  [ "$DRY" = 1 ] && { echo "DRY RUN: $MSG"; exit 0; }
+  record_state "$MSG"; exit 0
+fi
+
+if [ "$DRY" = 1 ]; then
+  echo "DRY RUN: #$NEXT_ISSUE を dispatch する (open PR $N_OPEN/$MAX_PRS, 本日 $N_TODAY/$MAXD)"
+  exit 0
+fi
+
+# --- 7. Maker → Verifier ---------------------------------------------------
+echo "firing: dispatching maker for issue #$NEXT_ISSUE"
+"$BIN_DIR/dispatch-maker" "$NEXT_ISSUE" || echo "maker dispatch 失敗（loops/runs/ を確認）"
+exit 0
