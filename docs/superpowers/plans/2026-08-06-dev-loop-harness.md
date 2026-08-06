@@ -21,6 +21,15 @@
 - **対象 OS は macOS / Linux。** Windows は WSL2 の中で使う前提
 - **コミットは Conventional Commits**（`feat:` / `fix:` / `test:` / `docs:` / `chore:`）
 - **テスト実行は `cd .loop && npx bats tests/`**
+- **bats の `setup()` は `.loop/tests/helpers.bash` の共通関数を呼ぶ。** 各タスクの
+  テストコードは `setup()` を展開した形で書かれているが、実装時は
+  `make_test_repo "$TMP"` / `use_mock_agent` / `use_gh_stub` / `use_ccusage_stub <name>` に
+  置き換えること（Task 1 で定義済み。挙動は同一）。`teardown()` は
+  `cleanup_test_repo; rm -rf "$TMP"` とする
+- **`dispatch-maker` / `dispatch-verifier` / `dispatch-fixer` は 3 本の独立したスクリプトとして書く。**
+  三者は worktree の扱いが本質的に異なる（新規作成 / detached checkout して必ず削除 /
+  既存を再利用）ため、共通化すると分岐だらけの関数になる。表層的な行の重複よりも
+  各スクリプトが単体で読めることを優先する、という設計判断（2026-08-06 に決定）
 
 ## File Structure
 
@@ -115,7 +124,8 @@ loops/runs/*.log
 `.loop/tests/helpers.bash`:
 
 ```bash
-# bats から source される共通ヘルパー
+# bats から source される共通ヘルパー。
+# 全 bats ファイルの setup() はここの関数を呼ぶ（各ファイルに書き下さない）。
 LOOP_REAL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export LOOP_REAL_DIR
 
@@ -128,7 +138,57 @@ make_loop_dir() {
   : > "$dest/config.toml"
   echo "$dest"
 }
+
+# 一時 git リポジトリを作り、REPO_ROOT / LOOP_DIR / TEST_TMP を export する。
+# $1 = 一時ディレクトリ（呼び出し側が mktemp -d して teardown で消す）
+make_test_repo() {
+  TEST_TMP="$1"; export TEST_TMP
+  REPO_ROOT="$1/repo"; export REPO_ROOT
+  mkdir -p "$REPO_ROOT/loops/runs" "$REPO_ROOT/loops/mtg"
+  printf '# STATE\n' > "$REPO_ROOT/loops/STATE.md"
+  LOOP_DIR="$(make_loop_dir "$REPO_ROOT/.loop")"; export LOOP_DIR
+  git -C "$REPO_ROOT" init -q -b main
+  git -C "$REPO_ROOT" config user.email t@example.com
+  git -C "$REPO_ROOT" config user.name t
+  echo one > "$REPO_ROOT/a.txt"
+  git -C "$REPO_ROOT" add -A
+  git -C "$REPO_ROOT" commit -qm init
+}
+
+# mock provider を有効にし、実物のプロンプトを fixture にコピーする。
+# config.toml を provider=mock + [project] コマンド付きで上書きする
+use_mock_agent() {
+  cp "$BATS_TEST_DIRNAME/fixtures/agents/mock.sh" "$LOOP_DIR/agents/mock.sh"
+  chmod +x "$LOOP_DIR/agents/mock.sh"
+  cp "$LOOP_REAL_DIR/prompts/"*.md "$LOOP_DIR/prompts/" 2>/dev/null || true
+  printf '[agent]\nprovider = "mock"\n\n[project]\ntest = "pnpm -r test"\nlint = "pnpm -r lint"\n' \
+    > "$LOOP_DIR/config.toml"
+}
+
+# gh スタブを PATH の先頭に置き、呼び出しログを GH_LOG に貯める
+use_gh_stub() {
+  chmod +x "$BATS_TEST_DIRNAME/fixtures/bin/gh"
+  PATH="$BATS_TEST_DIRNAME/fixtures/bin:$PATH"; export PATH
+  GH_LOG="$TEST_TMP/gh.log"; export GH_LOG
+}
+
+# ccusage スタブを差し込む。$1 = ok | over | garbage | fail
+use_ccusage_stub() {
+  chmod +x "$BATS_TEST_DIRNAME/fixtures/ccusage/$1.sh"
+  LOOP_CCUSAGE_CMD="$BATS_TEST_DIRNAME/fixtures/ccusage/$1.sh"; export LOOP_CCUSAGE_CMD
+}
+
+# teardown から呼ぶ。worktree の登録を消してから一時ディレクトリを消す
+cleanup_test_repo() {
+  git -C "$REPO_ROOT" worktree prune 2>/dev/null || true
+}
 ```
+
+**注意:** `make_test_repo` 以降の 4 関数は、Task 6 以降のテストが使うものです。
+Task 1 の時点では `make_loop_dir` しか使いませんが、後続タスクが各 bats ファイルに
+setup() を書き下さずに済むよう、ここでまとめて定義しておきます。
+`use_mock_agent` / `use_ccusage_stub` が参照する fixture は Task 4・Task 5 で作られるため、
+Task 1 の時点では未使用のまま置かれます。
 
 `.loop/tests/loop-config.bats`:
 
@@ -1525,7 +1585,8 @@ git commit -m "feat(cleanup): マージ済み loop worktree の片付けを追�
 # テスト用の gh スタブ。呼び出しを $GH_LOG に記録し、$GH_* 環境変数で応答を決める
 set -uo pipefail
 [ -n "${GH_LOG:-}" ] && echo "$*" >> "$GH_LOG"
-case "$1 $2" in
+# set -u 下で単独引数（gh --version 等）でも落ちないよう既定値を付ける
+case "${1:-} ${2:-}" in
   "issue view")
     if [ "${3:-}" = "--json" ] || [ "${4:-}" = "--json" ]; then
       echo "${GH_ISSUE_JSON:-{\"body\":\"\",\"state\":\"OPEN\"}}"
