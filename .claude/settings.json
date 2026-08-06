@@ -10,7 +10,8 @@
       "Bash(.loop/bin/loop-config:*)",
       "Bash(.loop/bin/loop-gate:*)",
       "Bash(.loop/bin/preview:*)",
-      "Bash(.loop/bin/firing --dry-run)"
+      "Bash(.loop/bin/firing --dry-run)",
+      "Bash(tr:*)"
     ]
   }
 }
