@@ -1,0 +1,28 @@
+# テンプレート同期（P5）の所有境界。上から順に評価し、最初に一致したルールを適用する。
+#
+#   template = テンプレート所有。同期で常に上書きする
+#   seeded   = テンプレートが初期版だけ置く。同期では絶対に触らない（新版があれば通知のみ）
+#   user     = ユーザー所有。テンプレートは存在を関知しない
+
+[[rules]]
+kind = "seeded"
+paths = [
+  ".loop/config.toml",
+  "docker/Dockerfile",
+  "CLAUDE.md",
+  ".claude/settings.json",
+]
+
+[[rules]]
+kind = "template"
+paths = [
+  ".loop/**",
+  ".claude/skills/**",
+  "docker/compose.yml",
+  "docker/entrypoint.sh",
+  "README.md",
+]
+
+[[rules]]
+kind = "user"
+paths = ["**"]
