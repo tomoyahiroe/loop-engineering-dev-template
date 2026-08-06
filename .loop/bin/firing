@@ -32,7 +32,10 @@ fi
 [ "$DRY" = 0 ] && "$BIN_DIR/cleanup-merged" || true
 
 # --- 2. 状況の収集 ---------------------------------------------------------
-READY_JSON="$(gh issue list --label loop:ready --state open --json number 2>/dev/null || echo '[]')"
+# labels も一緒に取る。選ばれた Issue が既に needs-human 済みか
+# （= 過去の tick で gate remediation 済みか）を、後続の gate 再検証で
+# 追加の gh 呼び出しをせずに判定するため
+READY_JSON="$(gh issue list --label loop:ready --state open --json number,labels 2>/dev/null || echo '[]')"
 NEXT_ISSUE="$(printf '%s' "$READY_JSON" | jnode '
 let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
   try{const a=JSON.parse(s);const n=a.map(x=>x.number);
@@ -47,7 +50,12 @@ let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
 
 MAX_PRS="$(cfg loop.max_open_prs)"
 MAXD="$(cfg loop.max_dispatch_per_day)"
-N_TODAY="$(ls "loops/runs/$DATE"-maker-issue-*.md 2>/dev/null | wc -l | tr -d ' ')"
+# *-maker-issue-<N>.md の glob は *-maker-issue-<N>.retry.md にも一致してしまう
+# （dispatch-maker が一過性エラーの 1 回リトライで書く別ファイル。元の .md は
+# 消さずに残す設計のため両方存在し得る）。1 回の論理的な dispatch がリトライ
+# しただけで 2 件と数えられ、max_dispatch_per_day を実際より早く使い切って
+# しまうので、.retry.md は数えない
+N_TODAY="$(ls "loops/runs/$DATE"-maker-issue-*.md 2>/dev/null | grep -v '\.retry\.md$' | wc -l | tr -d ' ')"
 
 # --- 3. 何もすることがなければ静かに終わる ---------------------------------
 if [ -z "$NEXT_ISSUE" ]; then
@@ -81,8 +89,38 @@ GOUT="$("$BIN_DIR/loop-gate" "$NEXT_ISSUE" 2>&1)" || GRC=$?
 if [ "$GRC" -ne 0 ]; then
   MSG="dispatch 中止 #$NEXT_ISSUE (gate 不合格。ready を剥がして needs-human)"
   if [ "$DRY" = 1 ]; then echo "DRY RUN: $MSG"; echo "$GOUT"; exit 0; fi
-  gh issue edit "$NEXT_ISSUE" --remove-label loop:ready >/dev/null 2>&1 || true
+
+  # 冪等性: needs-human が既に付いているなら、この Issue は過去の tick で
+  # 既に一度 remediate 済み（コメント・STATE 記録も済み）である。それでも
+  # また ready の一覧に出てきたということは、前回 --remove-label loop:ready
+  # が失敗した（ネットワーク瞬断・レート制限等）だけで、Issue の状態自体は
+  # 変わっていない。ここで毎 tick コメント/STATE 記録を繰り返すと、
+  # 1 日 12 回のペースで自己増殖するスパムになり自己修復しない。
+  # → needs-human の有無を「remediate 済み」の印として使い、コメントと
+  # STATE 記録は最初の 1 回だけに絞る。loop:ready の除去だけは毎回試みる
+  # （これが成功すれば次 tick からは ready 一覧に出てこなくなり、
+  # スパムの根本原因が解消する）
+  HAS_NEEDS_HUMAN="$(printf '%s' "$READY_JSON" | jnode "
+let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{
+  try{const a=JSON.parse(s);const hit=a.find(x=>String(x.number)===String($NEXT_ISSUE));
+    const labels=(hit&&hit.labels)||[];
+    process.stdout.write(labels.some(l=>l&&l.name==='needs-human')?'1':'0');}
+  catch{process.stdout.write('0')}})")"
+
+  REMOVE_FAILED=0
+  gh issue edit "$NEXT_ISSUE" --remove-label loop:ready >/dev/null 2>&1 || REMOVE_FAILED=1
+
+  if [ "$HAS_NEEDS_HUMAN" = "1" ]; then
+    # 既に remediate 済み。除去のリトライだけ行い、コメント・STATE 記録は
+    # 増やさない（初回のコメントで既に「ready を剥がして needs-human」と
+    # 人間には伝わっている）
+    exit 0
+  fi
+
   gh issue edit "$NEXT_ISSUE" --add-label needs-human >/dev/null 2>&1 || true
+  if [ "$REMOVE_FAILED" = 1 ]; then
+    MSG="$MSG — 注意: loop:ready の除去に失敗。次回 tick で再選定される可能性あり"
+  fi
   gh issue comment "$NEXT_ISSUE" --body "loop-gate 不合格のため dispatch を中止しました。
 
 \`\`\`

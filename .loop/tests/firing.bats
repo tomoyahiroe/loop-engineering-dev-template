@@ -213,3 +213,43 @@ EOF
   run wc -l < "$REPO_ROOT/loops/STATE.md"
   [ "$output" -eq 1 ]
 }
+
+# --- Fix round 1: レビュー指摘の回帰テスト ----------------------------------
+
+@test "gate 不合格の remediation は複数 tick に渡っても高々 1 回のコメント/STATE記録に留まる" {
+  export GH_ISSUE_JSON='{"body":"中身がない","state":"OPEN"}'
+
+  # tick 1: needs-human はまだ付いていない → 通常どおり remediate する
+  # （ready 除去 + needs-human 付与 + コメント 1 件 + STATE 1 行）
+  GH_ISSUE_LIST_JSON='[{"number":5,"labels":[]}]' run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+
+  # tick 2: 「前回 loop:ready の除去が失敗し、Issue がまた ready 一覧に出てきた」
+  # 状況を再現する。needs-human は（tick 1 で付与済みなので）既に付いている
+  GH_ISSUE_LIST_JSON='[{"number":5,"labels":[{"name":"needs-human"}]}]' \
+    run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+
+  run bash -c "grep -c '^issue comment 5 ' \"$GH_LOG\""
+  [ "$output" -eq 1 ]
+
+  run bash -c "grep -c 'dispatch 中止 #5' \"$REPO_ROOT/loops/STATE.md\""
+  [ "$output" -eq 1 ]
+
+  # ready の除去自体は tick 2 でも諦めずに再試行されている
+  # （自己修復の手段を残すため）
+  run bash -c "grep -c '^issue edit 5 --remove-label loop:ready' \"$GH_LOG\""
+  [ "$output" -eq 2 ]
+}
+
+@test "N_TODAY はリトライログを二重カウントしない（1 回の dispatch が retry しても 1 件）" {
+  printf '[agent]\nprovider = "mock"\n\n[loop]\nmax_dispatch_per_day = 2\n' > "$LOOP_DIR/config.toml"
+  touch "$REPO_ROOT/loops/runs/$(date +%Y-%m-%d)-maker-issue-3.md"
+  touch "$REPO_ROOT/loops/runs/$(date +%Y-%m-%d)-maker-issue-3.retry.md"
+
+  GH_ISSUE_LIST_JSON='[{"number":5}]' GH_ISSUE_JSON="$GOOD_ISSUE_JSON" \
+    run "$LOOP_REAL_DIR/bin/firing" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"日次上限"* ]]
+  [[ "$output" == *"DRY RUN: #5 を dispatch する"* ]]
+}
