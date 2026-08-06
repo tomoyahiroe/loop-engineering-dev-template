@@ -126,6 +126,13 @@ GOOD_ISSUE_JSON='{"body":"## 背景\nx\n\n## 受け入れ基準\n- [ ] `pnpm tes
   # 仕事がない tick では一切作られない
   run bash -c "ls -A '$REPO_ROOT/loops'/.gate-failed-* 2>/dev/null | wc -l | tr -d ' '"
   [ "$output" = "0" ]
+
+  # final review で追加したマーカー群（所有権・in-flight スキップ・
+  # 自動修正上限・ツール設定ミス）も同様に、仕事がない tick では作られない。
+  # 「空回りの tick は何も書かない」はこのハーネスの中心的な性質なので、
+  # マーカーを 1 つ足すたびにここで確認する
+  run bash -c "ls -A '$REPO_ROOT/loops'/.wt-owner-* '$REPO_ROOT/loops'/.inflight-skip-* '$REPO_ROOT/loops'/.fix-exhausted-* '$REPO_ROOT/loops'/.tools-misconfig 2>/dev/null | wc -l | tr -d ' '"
+  [ "$output" = "0" ]
 }
 
 @test "--dry-run は、実行すれば dispatch されるはずの状況でも STATE と worktree 一覧を変えない" {
