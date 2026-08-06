@@ -84,41 +84,43 @@ fi
 GRC=0
 GOUT="$("$BIN_DIR/loop-gate" "$NEXT_ISSUE" 2>&1)" || GRC=$?
 # remediation 済みかどうかの印は、GitHub 側のラベル状態ではなく、この
-# リポジトリが所有するローカルなマーカーファイルに持たせる。
-# 理由: 「remediate 済みか」を needs-human ラベルの有無で判定すると、その
-# 判定材料自体が gh 呼び出し（失敗し得る）で決まってしまう。具体的には
-# (a) コメント投稿だけが失敗し needs-human 付与は成功すると、次 tick は
-#     「remediate 済み」と誤認してコメントを二度と再試行しない
-#     （human への説明が永遠に届かない： round 2 で発見された新規バグ）
-# (b) needs-human 付与自体が（remove-label と一緒に）恒久的に失敗し続ける
-#     と、「remediate 済み」と判定されず、毎 tick コメント + STATE 記録が
-#     増殖し続ける（round 1 で残していた無制限の残存リスク）
-# ローカルファイルの存在確認はネットワーク越しの gh 呼び出しのように
-# 一過性失敗しないため、両方を塞げる
+# リポジトリが所有するローカルなマーカーファイルに持たせる（round 2 で導入）。
+# 判定材料自体が gh 呼び出し（失敗し得る）だと、その呼び出しが失敗する
+# タイミングで誤判定するため。
 MARKER="loops/.gate-failed-$NEXT_ISSUE"
 if [ "$GRC" -ne 0 ]; then
   MSG="dispatch 中止 #$NEXT_ISSUE (gate 不合格。ready を剥がして needs-human)"
   if [ "$DRY" = 1 ]; then echo "DRY RUN: $MSG"; echo "$GOUT"; exit 0; fi
 
-  # ready の除去は唯一の自己修復手段（成功すれば次 tick から ready 一覧に
-  # 出てこなくなる）なので、マーカーの有無に関わらず毎 tick 必ず試みる
-  REMOVE_FAILED=0
-  gh issue edit "$NEXT_ISSUE" --remove-label loop:ready >/dev/null 2>&1 || REMOVE_FAILED=1
+  # マーカーには「どの理由で remediate したか」の指紋（$GOUT のハッシュ）を
+  # 持たせる。理由が変わった（= 人間が re-label したが今度は別の箇所で
+  # gate に落ちた）のに古いマーカーだけで判定すると、新しい理由の説明が
+  # 二度と届かなくなるため（round 3 で指摘）
+  FINGERPRINT="$(printf '%s' "$GOUT" | node -e '
+let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+  const crypto=require("crypto");
+  process.stdout.write(crypto.createHash("sha256").update(s).digest("hex"));
+})')"
+  STORED_FP=""
+  [ -f "$MARKER" ] && STORED_FP="$(head -1 "$MARKER" 2>/dev/null)"
 
-  if [ -f "$MARKER" ]; then
-    # 既に一度 remediate 済み（= コメント投稿まで成功済み）。除去の
-    # リトライだけ行い、コメント・STATE 記録は増やさない
+  if [ -n "$STORED_FP" ] && [ "$STORED_FP" = "$FINGERPRINT" ]; then
+    # 同じ理由で既に remediate 済み（コメント投稿・STATE 記録まで成功
+    # 済み）。ここで再びやることは、loop:ready の除去（唯一の自己修復
+    # 手段）のリトライだけ。コメント・STATE 記録は増やさず静かに終わる
+    gh issue edit "$NEXT_ISSUE" --remove-label loop:ready >/dev/null 2>&1 || true
     exit 0
   fi
 
-  # 未 remediate（今回が初回、またはコメントがまだ一度も成功していない）。
-  # コメントを先に投稿し、それが成功した場合に限ってラベル付与・マーカー
-  # 書き込み・STATE 記録を行う。コメントが失敗したらここで exit し、
-  # マーカーを書かない＝次 tick も「未 remediate」のまま再試行される
-  # （説明が実際に届くまでリトライし続ける）
-  if [ "$REMOVE_FAILED" = 1 ]; then
-    MSG="$MSG — 注意: loop:ready の除去に失敗。次回 tick で再選定される可能性あり"
-  fi
+  # 未 remediate（今回が初回）、またはマーカーはあるが理由が変わった。
+  # 構造上の原則: 「リトライを止める操作（loop:ready の除去）は最後に
+  # 行う」。これを先頭でやってしまうと、それ以降のどの一手が失敗しても
+  # 二度とリトライされない一発勝負になる（round 3 で発見: 除去だけ成功し
+  # コメントが失敗すると、marker も comment も needs-human も STATE も
+  # 何も残らないまま Issue が ready 一覧から静かに消える）。
+  # コメントをまず投稿し、失敗したら何もラベルに触れずに抜ける
+  # （loop:ready はまだ付いたままなので、次 tick が自然に再選定して
+  # 丸ごとリトライする）
   if ! gh issue comment "$NEXT_ISSUE" --body "loop-gate 不合格のため dispatch を中止しました。
 
 \`\`\`
@@ -128,8 +130,15 @@ $GOUT
   fi
 
   gh issue edit "$NEXT_ISSUE" --add-label needs-human >/dev/null 2>&1 || true
-  printf '%s: %s\n' "$(date +%Y-%m-%d)" "$MSG" > "$MARKER"
+  {
+    printf '%s\n' "$FINGERPRINT"
+    printf '%s: %s\n' "$(date +%Y-%m-%d)" "$MSG"
+  } > "$MARKER"
   record_state "$MSG"
+  # リトライを止める操作は最後。ここまでの 3 手（コメント・付与・マーカー
+  # +STATE）は成功済みなので、これが失敗しても次 tick はマーカー一致で
+  # 「除去だけ再試行」の自己修復経路に入り、コメント・STATE は増えない
+  gh issue edit "$NEXT_ISSUE" --remove-label loop:ready >/dev/null 2>&1 || true
   exit 0
 fi
 

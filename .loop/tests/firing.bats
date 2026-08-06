@@ -271,15 +271,23 @@ EOF
   export GH_ISSUE_JSON='{"body":"中身がない","state":"OPEN"}'
   export GH_ISSUE_LIST_JSON='[{"number":5}]'
 
-  # tick 1: コメント投稿だけ失敗させる（ready 除去・後段の needs-human 付与は
-  # 成功する状況を再現）。round 1 の実装ならここで「remediate 済み」と誤認して
-  # 以後二度とコメントを試みなくなっていた（今回のレビューで発見された新規バグ）
+  # tick 1: コメント投稿だけ失敗させる。round 3 以降の実装ではコメントが
+  # 一連の remediation の最初の一手であり、loop:ready の除去は最後の一手
+  # なので、コメントが失敗した時点で除去は一切試みられない（Issue は
+  # ready のまま残る）。round 1 の実装ならここで「remediate 済み」と誤認して
+  # 以後二度とコメントを試みなくなっていた（round 2 レビューで発見された
+  # バグ）。round 2 の実装（除去が先頭）だと、除去だけ成功してコメントが
+  # 失敗するケースで全記録が消えて Issue が静かに消えていた（round 3 で発見）
   GH_ISSUE_COMMENT_EXIT=1 run "$LOOP_REAL_DIR/bin/firing"
   [ "$status" -eq 0 ]
   # コメントは失敗した扱いなので、マーカーもSTATE記録もまだ無い
   [ ! -f "$REPO_ROOT/loops/.gate-failed-5" ]
   run cat "$REPO_ROOT/loops/STATE.md"
   [[ "$output" != *"dispatch 中止 #5"* ]]
+  # loop:ready の除去はコメント成功より後の一手なので、tick 1 では
+  # 一切試みられていない（round 3 の核心: 除去が先頭ではないこと）
+  run bash -c "grep -c '^issue edit 5 --remove-label loop:ready' \"$GH_LOG\""
+  [ "$output" -eq 0 ]
 
   # tick 2: コメントが成功するようになった（一過性障害が解消した想定）
   run "$LOOP_REAL_DIR/bin/firing"
@@ -351,4 +359,111 @@ EOF
   run "$LOOP_REAL_DIR/bin/firing"
   [ "$status" -eq 0 ]
   [ ! -f "$REPO_ROOT/loops/.gate-failed-5" ]
+}
+
+# --- Fix round 3: レビュー指摘の回帰テスト -----------------------------------
+# round 2 は「remediate 済みか」の判定材料を needs-human ラベルからローカル
+# マーカーに変えたが、--remove-label loop:ready を（マーカーの有無に関わらず）
+# 毎 tick 無条件に・しかもコメントより先に実行していた。除去だけ成功して
+# コメントが失敗すると、マーカーもコメントも STATE も何も残らないまま
+# Issue が ready 一覧から静かに消える経路が残っていた。round 3 で
+# 「リトライを止める操作（除去）は最後に」に並べ替えて塞いだ。
+
+@test "remove-label が成功しうる状況でもコメントが3 tick連続で失敗し続ける限り、除去は一切試みられず Issue は ready から消えない" {
+  export GH_ISSUE_JSON='{"body":"中身がない","state":"OPEN"}'
+  export GH_ISSUE_LIST_JSON='[{"number":5}]'
+  # GH_STATE_DIR を指定し、"issue list" が実際の remove-label 成否を反映する
+  # ようにする（= 除去が起きれば本当に一覧から消える、起きなければ残る）
+  GH_STATE_DIR="$TMP/gh-state"; mkdir -p "$GH_STATE_DIR"; export GH_STATE_DIR
+  # コメントだけを持続的に失敗させる。remove-label 自体は（呼ばれれば）
+  # 成功する設定のまま — 「除去は成功しうるのにコメントが失敗し続ける」
+  # という round 3 が指摘した状況を正確に再現する
+  export GH_ISSUE_COMMENT_EXIT=1
+
+  run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+  run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+  run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+
+  # コメントは毎 tick リトライされている
+  run bash -c "grep -c '^issue comment 5 ' \"$GH_LOG\""
+  [ "$output" -eq 3 ]
+  # 除去は一度も試みられていない（コメント成功より後の一手のため）
+  run bash -c "grep -c '^issue edit 5 --remove-label loop:ready' \"$GH_LOG\""
+  [ "$output" -eq 0 ]
+  # マーカー・STATE も一切作られていない（コメントが一度も着地していない）
+  [ ! -f "$REPO_ROOT/loops/.gate-failed-5" ]
+  run cat "$REPO_ROOT/loops/STATE.md"
+  [[ "$output" == "# STATE" ]]
+
+  # 実際に GH_STATE_DIR ベースの issue list を引き直しても、Issue #5 は
+  # ready 一覧に残ったまま（静かに消えていないことの直接証拠）
+  unset GH_ISSUE_COMMENT_EXIT
+  run gh issue list --label loop:ready --state open --json number
+  [[ "$output" == *"5"* ]]
+}
+
+@test "remediation が完走した後は、次の issue list から実際に消える（gh スタブの状態遷移で確認）" {
+  export GH_ISSUE_JSON='{"body":"中身がない","state":"OPEN"}'
+  export GH_ISSUE_LIST_JSON='[{"number":5}]'
+  GH_STATE_DIR="$TMP/gh-state"; mkdir -p "$GH_STATE_DIR"; export GH_STATE_DIR
+
+  run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+  [ -f "$REPO_ROOT/loops/.gate-failed-5" ]
+  # 最後の一手（除去）まで成功しているはず
+  run bash -c "grep -c '^issue edit 5 --remove-label loop:ready' \"$GH_LOG\""
+  [ "$output" -eq 1 ]
+
+  run gh issue list --label loop:ready --state open --json number
+  [[ "$output" != *"5"* ]]
+}
+
+@test "gate 不合格の理由が変わったら（人間の re-label 後）別のコメントが1件増える" {
+  export GH_ISSUE_LIST_JSON='[{"number":5}]'
+
+  # tick 1: 理由 A（必須セクションが丸ごと欠落）
+  export GH_ISSUE_JSON='{"body":"中身がない","state":"OPEN"}'
+  run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+  run bash -c "grep -c '^issue comment 5 ' \"$GH_LOG\""
+  [ "$output" -eq 1 ]
+  FP_A="$(head -1 "$REPO_ROOT/loops/.gate-failed-5")"
+
+  # tick 2: 人間が re-label（GH_ISSUE_LIST_JSON はステートレスなので明示的に
+  # 再度セットするだけで良い）。ただし今度は理由 B（セクションは揃っているが
+  # 受け入れ基準に検証コマンドがない、という別の違反）で gate に落ちる
+  export GH_ISSUE_JSON='{"body":"## 背景\nx\n\n## 受け入れ基準\n- [ ] これは検証コマンドがない\n\n## 実装方針\n`a.txt` を編集\n\n## スコープ外\nなし\n\n## 依存\nなし\n","state":"OPEN"}'
+  run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+
+  # 理由が変わったので、指紋も変わり、2 件目のコメントが増える
+  # （「1 理由につき 1 コメント」であって「一生に 1 コメント」ではない）
+  run bash -c "grep -c '^issue comment 5 ' \"$GH_LOG\""
+  [ "$output" -eq 2 ]
+  run bash -c "grep -c 'dispatch 中止 #5' \"$REPO_ROOT/loops/STATE.md\""
+  [ "$output" -eq 2 ]
+  FP_B="$(head -1 "$REPO_ROOT/loops/.gate-failed-5")"
+  [ "$FP_A" != "$FP_B" ]
+}
+
+@test "fix round 3 のあとも既存の firing テスト群は回帰しない（空 tick の沈黙を含む）" {
+  # 空 tick の沈黙
+  cp "$REPO_ROOT/loops/STATE.md" "$TMP/state-before.md"
+  GH_ISSUE_LIST_JSON='[]' run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+  run cmp -s "$TMP/state-before.md" "$REPO_ROOT/loops/STATE.md"
+  [ "$status" -eq 0 ]
+
+  # 既存の 2 tick 冪等性（同一理由なら 1 コメント/1 STATE のまま）
+  export GH_ISSUE_JSON='{"body":"中身がない","state":"OPEN"}'
+  export GH_ISSUE_LIST_JSON='[{"number":5}]'
+  run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+  run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+  run bash -c "grep -c '^issue comment 5 ' \"$GH_LOG\""
+  [ "$output" -eq 1 ]
 }

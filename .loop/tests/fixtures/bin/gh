@@ -16,11 +16,41 @@ case "${1:-} ${2:-}" in
       echo "${GH_ISSUE_JSON:-$DEFAULT_ISSUE_JSON}"
     fi
     ;;
-  "issue list") echo "${GH_ISSUE_LIST_JSON:-[]}" ;;
+  "issue list")
+    # 既定は完全にステートレス（GH_ISSUE_LIST_JSON をそのまま返すだけ）。
+    # GH_STATE_DIR を指定したテストだけ、以前の "issue edit ... --remove-label
+    # loop:ready" 成功が反映された一覧を返す（実際の GitHub は remove-label が
+    # 成功すれば以後 --label loop:ready の一覧に出てこなくなるため。これが
+    # ないと、複数 tick に渡るテストが「remediate 済みで消えた」のか
+    # 「まだ ready でリトライ中」なのかを区別できない）
+    if [ -n "${GH_STATE_DIR:-}" ]; then
+      printf '%s' "${GH_ISSUE_LIST_JSON:-[]}" | node -e '
+let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+  try{
+    const fs=require("fs");
+    const dir=process.env.GH_STATE_DIR;
+    const a=JSON.parse(s);
+    const out=a.filter(x=>!fs.existsSync(dir+"/removed-"+x.number));
+    process.stdout.write(JSON.stringify(out));
+  }catch{process.stdout.write("[]")}
+})'
+    else
+      echo "${GH_ISSUE_LIST_JSON:-[]}"
+    fi
+    ;;
   # remove-label / add-label はどちらも "issue edit" に落ちるので、片方だけを
   # 狙って失敗させることはできない（firing の「両方失敗し続ける」ケースの
   # テストにはこれで十分。個別に落としたければ引数まで見て分岐を増やす）
-  "issue edit")    exit "${GH_ISSUE_EDIT_EXIT:-${GH_EXIT:-0}}" ;;
+  "issue edit")
+    RC="${GH_ISSUE_EDIT_EXIT:-${GH_EXIT:-0}}"
+    # remove-label loop:ready が「成功」したときだけ、GH_STATE_DIR に印を
+    # 残す（issue list 側がこれを見て以後の一覧から除外する）
+    if [ "$RC" = 0 ] && [ -n "${GH_STATE_DIR:-}" ] \
+       && [ "${4:-}" = "--remove-label" ] && [ "${5:-}" = "loop:ready" ]; then
+      touch "$GH_STATE_DIR/removed-${3:-}"
+    fi
+    exit "$RC"
+    ;;
   "issue comment") exit "${GH_ISSUE_COMMENT_EXIT:-${GH_EXIT:-0}}" ;;
   "pr list")    echo "${GH_PR_LIST_JSON:-[]}" ;;
   "pr view")    echo "${GH_PR_VIEW_JSON:-$DEFAULT_PR_VIEW_JSON}" ;;
