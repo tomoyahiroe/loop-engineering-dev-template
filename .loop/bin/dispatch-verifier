@@ -81,6 +81,7 @@ git worktree add --detach "$WT" main >/dev/null 2>&1 || {
 # 静かに消える。PROMPT は空文字であっても代入自体は成功するので（$(mktemp) が
 # 万一失敗しても PROMPT は未定義にはならない）、trap 内で set -u に触れて
 # 丸ごと落ちる心配もない。
+#
 # 検証中はこの worktree の所有権を主張する。これが無いと、SIGKILL で残った
 # 残骸と「別の起動が今まさに使っている worktree」を区別できず、上のパス存在
 # チェックがどちらも一律に SKIP になってしまう（= その PR の検証が永久に
