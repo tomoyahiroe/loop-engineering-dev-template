@@ -51,6 +51,46 @@ teardown() {
   [[ "$output" == *"SKIPPED"* ]]
 }
 
+@test "in-flight スキップでも loop:ready を剥がし直す（待ち行列が先頭で詰まらない）" {
+  # loop:ready の除去は dispatch 時に best-effort で 1 回試みるだけなので、
+  # gh の一過性エラーや人間の re-label で簡単に元に戻る。その状態で
+  # スキップ分岐がラベルに触れないと、firing は毎 tick この Issue を
+  # min(loop:ready) として選び続け、後ろの ready な Issue が永久に
+  # dispatch されない（待ち行列全体が止まる）
+  "$LOOP_REAL_DIR/bin/dispatch-maker" 7
+  rm -f "$GH_LOG"
+  run "$LOOP_REAL_DIR/bin/dispatch-maker" 7
+  [ "$status" -eq 0 ]
+  run cat "$GH_LOG"
+  [[ "$output" == *"--remove-label loop:ready"* ]]
+}
+
+@test "in-flight スキップが続いても STATE 記録は 1 回、除去は毎回リトライされる（3 回）" {
+  "$LOOP_REAL_DIR/bin/dispatch-maker" 7
+  rm -f "$GH_LOG"
+  "$LOOP_REAL_DIR/bin/dispatch-maker" 7
+  "$LOOP_REAL_DIR/bin/dispatch-maker" 7
+  "$LOOP_REAL_DIR/bin/dispatch-maker" 7
+  run bash -c "grep -c 'maker issue-7 SKIPPED' \"$REPO_ROOT/loops/STATE.md\""
+  [ "$output" -eq 1 ]
+  run bash -c "grep -c '^issue edit 7 --remove-label loop:ready' \"$GH_LOG\""
+  [ "$output" -eq 3 ]
+  [ -f "$REPO_ROOT/loops/.inflight-skip-7" ]
+}
+
+@test "in-flight が解消したらスキップマーカーは片付く（次に詰まったらまた記録できる）" {
+  "$LOOP_REAL_DIR/bin/dispatch-maker" 7
+  "$LOOP_REAL_DIR/bin/dispatch-maker" 7
+  [ -f "$REPO_ROOT/loops/.inflight-skip-7" ]
+
+  # worktree と branch が片付いた状態にしてから再 dispatch する
+  git -C "$REPO_ROOT" worktree remove --force "$TMP/repo-issue-7"
+  git -C "$REPO_ROOT" branch -D loop/issue-7
+  run "$LOOP_REAL_DIR/bin/dispatch-maker" 7
+  [ "$status" -eq 0 ]
+  [ ! -f "$REPO_ROOT/loops/.inflight-skip-7" ]
+}
+
 @test "maturity = L1 では拒否する" {
   # maturity はトップレベルのキーなので、テーブル見出しより前に書く
   printf 'maturity = "L1"\n[agent]\nprovider = "mock"\n' > "$LOOP_DIR/config.toml"

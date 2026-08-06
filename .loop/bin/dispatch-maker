@@ -26,11 +26,30 @@ BRANCH="loop/issue-$ISSUE"
 #      in-flight でも exit 1「SKIP: 予算ゲート」に化けてしまい、
 #      呼び出し元/監視に偽の失敗として見えてしまう
 #   2. 何もしない tick のたびに ccusage を叩くのは無駄なコスト
+SKIP_MARKER="loops/.inflight-skip-$ISSUE"
 if [ -d "$WT" ] || git show-ref --verify --quiet "refs/heads/$BRANCH"; then
-  record_state "maker issue-$ISSUE SKIPPED (既に in-flight: worktree/branch が存在)"
+  # 記録は「この Issue につき 1 回」に抑える（gate-remediation・L3 merge 失敗と
+  # 同じローカルマーカー方式）。判定材料を GitHub 側の状態ではなくローカル
+  # ファイルに持つ理由も同じ: gh が落ちているときこそ誤判定してはいけない
+  if [ ! -f "$SKIP_MARKER" ]; then
+    record_state "maker issue-$ISSUE SKIPPED (既に in-flight: worktree/branch が存在)"
+    touch "$SKIP_MARKER" 2>/dev/null || true
+  fi
   echo "SKIP: issue-$ISSUE は既に in-flight"
+
+  # firing は毎 tick min(loop:ready) を選ぶので、ここで loop:ready が付いた
+  # ままだと、この Issue が永久に先頭に居座り、後ろの ready な Issue が
+  # 1 件も dispatch されない（待ち行列全体が止まる）。除去は dispatch 時に
+  # best-effort で 1 回試みているだけなので、gh の一過性エラーや人間の
+  # re-label で簡単に元に戻る。ここで諦めずに剥がし直すのが唯一の自己修復
+  # 手段（firing の gate-remediation が同じことをしている）。
+  # 「リトライを止める操作は最後の一手」の原則どおり、記録より後に置く
+  gh issue edit "$ISSUE" --remove-label loop:ready >/dev/null 2>&1 || true
   exit 0
 fi
+# ここに来た = in-flight ではない。過去のスキップ記録はもう有効ではないので
+# 片付ける（次に詰まったときにまた 1 回記録できるようにするため）
+rm -f "$SKIP_MARKER" 2>/dev/null || true
 
 # ツール許可の確認も、ローカルな設定を読むだけの安価な処理なので
 # budget-check より先に置く。in-flight チェックより後なのは、既に走っている

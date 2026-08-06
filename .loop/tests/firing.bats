@@ -449,6 +449,47 @@ EOF
   [ "$FP_A" != "$FP_B" ]
 }
 
+# --- Final review: 待ち行列の先頭詰まり（head-of-line jam）の回帰テスト -------
+# firing は毎 tick min(loop:ready) を選ぶ。先頭の Issue に worktree/branch の
+# 残骸があると dispatch-maker は「既に in-flight」で exit 0 するが、以前は
+# そこで loop:ready を剥がし直していなかったため、その Issue が永久に先頭に
+# 居座り、後ろの ready な Issue が 1 件も dispatch されなくなっていた
+# （実機で 3 tick 連続 dispatch ゼロを再現済み）。
+
+@test "先頭の Issue が in-flight で詰まっていても、後続の ready な Issue が dispatch される" {
+  export GH_ISSUE_JSON="$GOOD_ISSUE_JSON"
+  export GH_ISSUE_LIST_JSON='[{"number":5},{"number":6}]'
+  # remove-label の成否を issue list に反映させる（= 本当に一覧から消えるか）
+  GH_STATE_DIR="$TMP/gh-state"; mkdir -p "$GH_STATE_DIR"; export GH_STATE_DIR
+
+  # #5 の worktree が残骸として残っている状況。main と同じコミットのままだと
+  # cleanup-merged の片付け対象になってしまうので 1 コミット進めて
+  # 「open な PR を持つ worktree」を再現する
+  git -C "$REPO_ROOT" worktree add -q "$TMP/repo-issue-5" -b loop/issue-5 main
+  echo wip > "$TMP/repo-issue-5/b.txt"
+  git -C "$TMP/repo-issue-5" add -A
+  git -C "$TMP/repo-issue-5" commit -qm wip
+
+  # tick 1: #5 が選ばれ、in-flight なので skip。ここで loop:ready を剥がし直す
+  run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+  [ ! -d "$TMP/repo-issue-6" ]
+  run bash -c "grep -c '^issue edit 5 --remove-label loop:ready' \"$GH_LOG\""
+  [ "$output" -eq 1 ]
+
+  # tick 2: #5 は ready 一覧から消えたので #6 が選ばれ、実際に dispatch される
+  run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+  [ -d "$TMP/repo-issue-6" ]
+  run git -C "$REPO_ROOT" show-ref --verify --quiet refs/heads/loop/issue-6
+  [ "$status" -eq 0 ]
+  run cat "$REPO_ROOT/loops/STATE.md"
+  [[ "$output" == *"maker issue-6"* ]]
+
+  # 残骸（#5 の worktree とそのコミット）は消されずに残っている
+  [ -d "$TMP/repo-issue-5" ]
+}
+
 @test "fix round 3 のあとも既存の firing テスト群は回帰しない（空 tick の沈黙を含む）" {
   # 空 tick の沈黙
   cp "$REPO_ROOT/loops/STATE.md" "$TMP/state-before.md"
