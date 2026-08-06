@@ -90,6 +90,42 @@ require_project_tools_allowed() {
   return 1
 }
 
+# --- worktree の所有権マーカー ----------------------------------------------
+# cleanup-merged は無人で worktree とブランチを消すが、「まだ 1 度もコミット
+# していない Maker の worktree」は main と同じ内容・完全にクリーンなので、
+# 放置された残骸と見分けが付かない（実行中の Maker ごと消される。
+# turns.maker = 120 の実行は発火間隔 2 時間を超え得るため現実に起きる）。
+# dispatcher が実行中だけ所有権を主張できるようにする。
+#
+# 判定材料はこのリポジトリが所有するローカルなファイルだけで完結させる
+# （GitHub 側の状態には一切依存しない）。マーカーの中身は所有者の PID で、
+# 参照側は kill -0 で生存を確認する。SIGKILL でマーカーが残っても PID が
+# 死んでいれば所有権は失効するので、片付けが永久に止まることはない。
+wt_owner_file() { # $1 = キー（"loop/issue-5" でも "issue-5" でも可）
+  printf '%s/loops/.wt-owner-%s' "$REPO_ROOT" "${1#loop/}"
+}
+
+claim_worktree() { # $1 = キー
+  printf '%s\n' "$$" > "$(wt_owner_file "$1")" 2>/dev/null || true
+}
+
+release_worktree() { # $1 = キー
+  rm -f "$(wt_owner_file "$1")" 2>/dev/null || true
+}
+
+# 生きた所有者がいるか。マーカーが壊れている等で判断できない場合は
+# 「所有されている」= 触らない側に倒す（cleanup-merged の中心的な原則）
+worktree_is_claimed() { # $1 = キー
+  local f pid
+  f="$(wt_owner_file "$1")"
+  [ -f "$f" ] || return 1
+  pid="$(head -1 "$f" 2>/dev/null)"
+  case "$pid" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  kill -0 "$pid" 2>/dev/null
+}
+
 # テンプレートの {{KEY}} を置換して標準出力する。
 # bash のパターン置換を使うので、値に / & \ が含まれても壊れない（sed との違い）
 render_prompt() {

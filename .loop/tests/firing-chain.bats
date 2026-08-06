@@ -22,14 +22,16 @@ setup() {
   git -C "$REPO_ROOT" add -A
   git -C "$REPO_ROOT" commit -qm init
   git -C "$REPO_ROOT" worktree add -q "$TMP/repo-issue-9" -b loop/issue-9 main
-  # cleanup-merged（firing の section 1、DRY=0 なら毎回無条件で走る）は
-  # 「main の祖先 かつ 作業ツリーがクリーン」な loop/issue-* worktree を
-  # 安全に片付けてよい対象とみなして実際に消す。ブランチを main と同じ
-  # コミットのまま放置すると、この worktree はその条件に一致してしまい、
-  # dispatch-fixer が使うはずの「生きた worktree」が Fixer に渡る前に
-  # cleanup-merged に消される（実機で再現確認済み）。実際の運用では PR が
-  # open な間は必ず main にはないコミットを持つので、ここで 1 コミット
-  # 進めて「open な PR の worktree」を正しく再現する
+  # この worktree は「open な PR を持つ Issue の作業ツリー」を再現するもの。
+  # 実運用では PR が open な間、必ず main には無いコミットを持っているので、
+  # ここで 1 コミット進めてその状態に合わせる。
+  #
+  # （なお「実行中の Maker/Fixer の worktree を cleanup-merged が消してしまう」
+  # 問題自体は、dispatcher が実行中だけ主張する所有権マーカー
+  # loops/.wt-owner-* で製品側が塞いである。ここでその仕組みに頼らないのは、
+  # このセットアップが dispatcher を経由せずテストが直接作った worktree で
+  # あり、所有者がいないため。所有権の挙動自体は cleanup-merged.bats と
+  # dispatch-maker.bats が別途カバーしている）
   echo two > "$TMP/repo-issue-9/b.txt"
   git -C "$TMP/repo-issue-9" add -A
   git -C "$TMP/repo-issue-9" commit -qm wip

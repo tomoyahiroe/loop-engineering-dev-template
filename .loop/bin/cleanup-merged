@@ -79,9 +79,15 @@ while IFS= read -r line; do
     "worktree "*) WT_PATH="${line#worktree }" ;;
     "branch refs/heads/loop/issue-"*|"branch refs/heads/loop/preview-"*)
       BRANCH="${line#branch refs/heads/}"
+      # 実行中の dispatcher が所有権を主張している worktree には触らない。
+      # まだ 1 度もコミットしていない Maker の worktree は「main と同一・
+      # クリーン」であり、片付けてよい残骸と姿が完全に同じになるため、
+      # この確認がないと実行中の Maker の足元を消してしまう
+      if worktree_is_claimed "$BRANCH"; then
+        :
       # main に取り込み済みか（= 中身が確実に main にある）。
       # squash / rebase merge も検出する（branch_content_is_in_main のコメント参照）
-      if branch_content_is_in_main "$BRANCH"; then
+      elif branch_content_is_in_main "$BRANCH"; then
         # worktree の作業ツリーに変更が残っていないか。--ignored を付けて
         # gitignore 対象の未追跡ファイル（.env 等）も検出対象に含める。
         # 出力が空でない、または status 自体が失敗（worktree が壊れている等）
@@ -100,6 +106,10 @@ while IFS= read -r line; do
               # リモートブランチの削除は best-effort（失敗しても無視）
               git push origin --delete "$BRANCH" >/dev/null 2>&1 || true
               echo "片付け: $BRANCH ($WT_PATH)"
+              # 削除は不可逆なので、cron の stdout（誰も読まない）だけでなく
+              # 人間が毎朝読む STATE.md にも残す。実際に消したときだけ記録
+              # するので、片付けるものが無い tick は無音のまま（空回りゼロ）
+              record_state "片付け: $BRANCH ($WT_PATH)"
             fi
           fi
         fi

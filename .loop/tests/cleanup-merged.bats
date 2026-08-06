@@ -185,6 +185,65 @@ make_wt() { # $1 = issue 番号, $2 = ファイル内容
 # 成功として報告してしまう。branch -D の終了コードを実際に確認してから
 # 後続処理をゲートしていることを、branch -D だけを失敗させる git stub で
 # 検証する
+# --- Final review: 実行中の dispatcher が使っている worktree を消さない -------
+# まだ 1 度もコミットしていない Maker の worktree は「branch が main と同一・
+# 作業ツリーは完全にクリーン」であり、片付けてよい残骸と姿がまったく同じ。
+# dispatcher が実行中だけ主張する所有権マーカー（PID 入り）で区別する。
+
+@test "所有者が生きている worktree には触らない（実行中の Maker を消さない）" {
+  # コミット前の Maker の worktree を再現する（main と同一・クリーン）
+  git -C "$REPO_ROOT" worktree add -q "$TMP/repo-issue-20" -b loop/issue-20 main
+  # 生きている PID（このテストプロセス自身）を所有者として書く
+  echo $$ > "$REPO_ROOT/loops/.wt-owner-issue-20"
+
+  run "$LOOP_REAL_DIR/bin/cleanup-merged"
+  [ "$status" -eq 0 ]
+  [ -d "$TMP/repo-issue-20" ]
+  run git -C "$REPO_ROOT" show-ref --verify --quiet refs/heads/loop/issue-20
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "所有者の PID が死んでいれば片付ける（SIGKILL でマーカーが残っても詰まらない）" {
+  git -C "$REPO_ROOT" worktree add -q "$TMP/repo-issue-21" -b loop/issue-21 main
+  # OS の pid_max を超える値なので、実在するプロセスと衝突しない
+  echo 999999 > "$REPO_ROOT/loops/.wt-owner-issue-21"
+
+  run "$LOOP_REAL_DIR/bin/cleanup-merged"
+  [ "$status" -eq 0 ]
+  [ ! -d "$TMP/repo-issue-21" ]
+  run git -C "$REPO_ROOT" show-ref --verify --quiet refs/heads/loop/issue-21
+  [ "$status" -ne 0 ]
+}
+
+@test "所有権マーカーが壊れていたら触らない（判断できない場合は安全側）" {
+  git -C "$REPO_ROOT" worktree add -q "$TMP/repo-issue-22" -b loop/issue-22 main
+  echo "not-a-pid" > "$REPO_ROOT/loops/.wt-owner-issue-22"
+
+  run "$LOOP_REAL_DIR/bin/cleanup-merged"
+  [ "$status" -eq 0 ]
+  [ -d "$TMP/repo-issue-22" ]
+  run git -C "$REPO_ROOT" show-ref --verify --quiet refs/heads/loop/issue-22
+  [ "$status" -eq 0 ]
+}
+
+@test "片付けたときは STATE.md にも記録する（不可逆な操作の監査）" {
+  make_wt 23 hello
+  git -C "$REPO_ROOT" merge -q --no-edit loop/issue-23
+  run "$LOOP_REAL_DIR/bin/cleanup-merged"
+  [ "$status" -eq 0 ]
+  run cat "$REPO_ROOT/loops/STATE.md"
+  [[ "$output" == *"片付け: loop/issue-23"* ]]
+}
+
+@test "片付けるものがない tick は STATE.md に何も書かない（空回りゼロの維持）" {
+  cp "$REPO_ROOT/loops/STATE.md" "$TMP/state-before.md"
+  run "$LOOP_REAL_DIR/bin/cleanup-merged"
+  [ "$status" -eq 0 ]
+  run cmp -s "$TMP/state-before.md" "$REPO_ROOT/loops/STATE.md"
+  [ "$status" -eq 0 ]
+}
+
 # --- Final review: squash merge の検出（片付け漏れ）と、その裏返しである
 # 「未マージを消さない」性質の両方向を固定する -------------------------------
 # firing の L3 自動 merge は `gh pr merge --squash` を使う。squash merge された

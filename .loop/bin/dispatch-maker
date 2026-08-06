@@ -63,10 +63,23 @@ git worktree add "$WT" -b "$BRANCH" main || {
   record_state "maker issue-$ISSUE FAILED (worktree 作成に失敗)"
   exit 1
 }
+
+# 実行中はこの worktree の所有権を主張する。まだ 1 度もコミットしていない
+# 段階では branch は main と同一・作業ツリーはクリーンなので、cleanup-merged
+# から見ると「取り込み済みの残骸」と完全に同じ姿になる。並行する firing が
+# 走ればその場で worktree ごと消され、Maker は実行中に足元を失う
+# （turns.maker = 120 の実行は発火間隔を超え得るので現実に起きる）。
+#
+# trap は 1 本にまとめる。trap ... EXIT は呼ぶたびに前回分を丸ごと上書き
+# する（追加登録ではない）ので、後段で PROMPT 用の trap を別に install すると
+# この release が静かに消える。PROMPT はこの時点ではまだ未定義なので
+# ${PROMPT:-} で参照する（set -u 対策）
+claim_worktree "issue-$ISSUE"
+trap 'release_worktree "issue-$ISSUE"; rm -f "${PROMPT:-}"' EXIT
+
 gh issue edit "$ISSUE" --remove-label loop:ready >/dev/null 2>&1 || true
 
 PROMPT="$(mktemp)"
-trap 'rm -f "$PROMPT"' EXIT
 render_prompt "$LOOP_DIR/prompts/maker.md" \
   "ISSUE=$ISSUE" \
   "TEST_CMD=$(cfg project.test || echo '')" \

@@ -91,6 +91,67 @@ teardown() {
   [ ! -f "$REPO_ROOT/loops/.inflight-skip-7" ]
 }
 
+@test "Maker の実行中に cleanup-merged が走っても worktree は消されない" {
+  # 実機で踏んだ事故の再現: コミット前の Maker の worktree は「branch が main
+  # と同一・作業ツリーはクリーン」なので、cleanup-merged からは片付けてよい
+  # 残骸と完全に同じ姿に見える。並行する firing（毎 tick cleanup-merged を
+  # 呼ぶ）が実行中の Maker の足元を消してしまっていた。
+  # provider スタブの中から実際に cleanup-merged を走らせて直接確認する
+  printf '[agent]\nprovider = "concurrent-cleanup"\n\n[project]\ntest = "pnpm -r test"\nlint = "pnpm -r lint"\n' \
+    > "$LOOP_DIR/config.toml"
+  cat > "$LOOP_DIR/agents/concurrent-cleanup.sh" <<EOF
+#!/usr/bin/env bash
+set -uo pipefail
+# Maker が「まだ何もコミットしていない」時点で cleanup-merged を走らせる
+"$LOOP_REAL_DIR/bin/cleanup-merged" > "$TMP/cleanup-out.txt" 2>&1
+# 自分の作業ディレクトリがまだ生きているかを記録する
+if [ -d "\$LOOP_CWD" ]; then echo alive > "$TMP/wt-state"; else echo gone > "$TMP/wt-state"; fi
+exit 0
+EOF
+  chmod +x "$LOOP_DIR/agents/concurrent-cleanup.sh"
+
+  run "$LOOP_REAL_DIR/bin/dispatch-maker" 7
+  [ "$status" -eq 0 ]
+  [ "$(cat "$TMP/wt-state")" = "alive" ]
+  [ -d "$TMP/repo-issue-7" ]
+  run git -C "$REPO_ROOT" show-ref --verify --quiet refs/heads/loop/issue-7
+  [ "$status" -eq 0 ]
+  # cleanup 側も「片付けた」と報告していない
+  run cat "$TMP/cleanup-out.txt"
+  [[ "$output" != *"片付け"* ]]
+}
+
+@test "所有権マーカーは実行中だけ存在し、終了時に必ず片付く" {
+  cat > "$LOOP_DIR/agents/probe.sh" <<EOF
+#!/usr/bin/env bash
+set -uo pipefail
+if [ -f "$REPO_ROOT/loops/.wt-owner-issue-7" ]; then
+  echo "claimed:\$(cat "$REPO_ROOT/loops/.wt-owner-issue-7")" > "$TMP/claim-state"
+else
+  echo "unclaimed" > "$TMP/claim-state"
+fi
+exit \${MOCK_EXIT:-0}
+EOF
+  chmod +x "$LOOP_DIR/agents/probe.sh"
+  printf '[agent]\nprovider = "probe"\n\n[project]\ntest = "pnpm -r test"\nlint = "pnpm -r lint"\n' \
+    > "$LOOP_DIR/config.toml"
+
+  run "$LOOP_REAL_DIR/bin/dispatch-maker" 7
+  [ "$status" -eq 0 ]
+  run cat "$TMP/claim-state"
+  [[ "$output" == claimed:* ]]
+  # 終了後は解放されている（残ると cleanup-merged が永久に片付けられなくなる）
+  [ ! -f "$REPO_ROOT/loops/.wt-owner-issue-7" ]
+}
+
+@test "エージェントが失敗しても所有権マーカーは解放される（片付けを永久に止めない）" {
+  MOCK_EXIT=5 run "$LOOP_REAL_DIR/bin/dispatch-maker" 7
+  [ "$status" -eq 1 ]
+  [ ! -f "$REPO_ROOT/loops/.wt-owner-issue-7" ]
+  # 失敗時に worktree を残置する既存の保証は維持されている
+  [ -d "$TMP/repo-issue-7" ]
+}
+
 @test "maturity = L1 では拒否する" {
   # maturity はトップレベルのキーなので、テーブル見出しより前に書く
   printf 'maturity = "L1"\n[agent]\nprovider = "mock"\n' > "$LOOP_DIR/config.toml"

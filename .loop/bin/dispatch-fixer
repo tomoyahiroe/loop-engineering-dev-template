@@ -58,8 +58,14 @@ if [ "$GATE_RC" -ne 0 ]; then
   exit 1
 fi
 
+# Maker の worktree をそのまま借りて動くので、実行中は所有権を主張する
+# （PR が squash merge された直後などに、並行する cleanup-merged が
+# 「取り込み済み」と判定してこの worktree を消してしまうのを防ぐ）。
+# trap は dispatch-maker と同じ理由で 1 本にまとめる
+claim_worktree "issue-$ISSUE"
+trap 'release_worktree "issue-$ISSUE"; rm -f "${PROMPT:-}"' EXIT
+
 PROMPT="$(mktemp)"
-trap 'rm -f "$PROMPT"' EXIT
 render_prompt "$LOOP_DIR/prompts/fixer.md" \
   "PR=$PR" "ISSUE=$ISSUE" "ROUND=$ROUND" \
   "TEST_CMD=$(cfg project.test || echo '')" \
