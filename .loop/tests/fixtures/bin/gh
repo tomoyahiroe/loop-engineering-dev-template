@@ -54,7 +54,12 @@ let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
   "issue comment") exit "${GH_ISSUE_COMMENT_EXIT:-${GH_EXIT:-0}}" ;;
   "pr list")    echo "${GH_PR_LIST_JSON:-[]}" ;;
   "pr view")    echo "${GH_PR_VIEW_JSON:-$DEFAULT_PR_VIEW_JSON}" ;;
-  "pr merge")   ;;
+  # pr merge だけを狙って失敗させたいテスト向けの選択的ノブ。GH_EXIT は
+  # 全コマンドに効いてしまい、firing の "pr merge" より前に呼ばれる
+  # "issue list" / "pr list" まで巻き込んで壊すため、pr merge の失敗経路
+  # 単体をテストできない。未指定時は既定どおり GH_EXIT にフォールバックする
+  # ので、これを使わない既存テストの挙動は一切変わらない
+  "pr merge")   exit "${GH_PR_MERGE_EXIT:-${GH_EXIT:-0}}" ;;
   *) ;;
 esac
 exit "${GH_EXIT:-0}"

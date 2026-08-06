@@ -83,21 +83,39 @@ fi
 # --- 2.6 L3: approve 済み かつ auto-merge ラベル付きの PR を merge ---------
 # merge は不可逆な最終手段なので、この if の外側では絶対に副作用を起こさない
 # （--dry-run はこの節に到達する前提自体を DRY=0 で塞いでいる）。
-# 個々の PR について「merge を試みる」こと自体が、このワークフローにおける
-# 「リトライを止める最後の一手」にあたる（merge が成功すれば PR は closed に
-# なり、次 tick の gh pr list --state open にはもう出てこなくなるので、
-# それ以上の自己修復操作は不要）。そのため record_state / echo は merge の
-# 成否を受けて後から報告するだけでよい
+# merge 成功時は PR が closed になり、次 tick の gh pr list --state open には
+# もう出てこなくなるので、それ以上の自己修復操作は不要（成功時のリトライ
+# 停止は merge そのものが担う）。
+#
+# 一方、失敗は一過性とは限らない。branch protection 未整合や conflict は
+# tick を跨いでも自然には解消しない持続的な原因であることが多く、何もせず
+# 毎 tick 記録すると「解消しない失敗」が schedule.firings_per_day 回/日で
+# 無期限に STATE.md（人間が毎朝読む一次情報）に積み上がる。gate-remediation
+# ブロックで対処したのと同種の問題なので、同じ「PR ごとのローカルな
+# マーカーファイルで冪等性を判定する」方式を流用する（reason の指紋までは
+# 持たせない — ここでは merge 失敗を単一の事象として扱い、PR 1 件につき
+# 1 回の記録で足りるため）。原則は同じ: 「以後の報告を抑制する操作
+# （マーカー作成）は、informative な手（record_state・needs-human 付与）
+# より後に置く」。先に record_state が失敗しても needs-human が付かなくても、
+# マーカーさえ書かれていなければ次 tick でまた最初からやり直せる
 if [ "$DRY" = 0 ] && [ "$MATURITY" = "L3" ]; then
   AM_LABEL="$(cfg loop.auto_merge_label)"
   while IFS="$(printf '\t')" read -r MPR MISSUE; do
     [ -n "$MPR" ] || continue
+    MMARKER="loops/.merge-failed-$MPR"
     if gh pr merge "$MPR" --squash --delete-branch >/dev/null 2>&1; then
       record_state "L3 自動 merge: PR #$MPR (issue #$MISSUE)"
       echo "firing: auto-merged PR #$MPR"
+      # 過去に失敗記録が残っていても、成功した以上もう有効ではない
+      rm -f "$MMARKER" 2>/dev/null || true
+    elif [ -f "$MMARKER" ]; then
+      # 同じ PR について既に 1 回記録済み。merge 自体は毎 tick 静かに
+      # リトライし続けるが（自己修復のため）、STATE への追記はしない
+      :
     else
       record_state "L3 自動 merge に失敗: PR #$MPR — needs-human"
       gh issue edit "$MISSUE" --add-label needs-human >/dev/null 2>&1 || true
+      touch "$MMARKER" 2>/dev/null || true
     fi
   done < <(printf '%s' "$PR_JSON" | node "$LIB_DIR/pr-triage.mjs" --mode auto-merge --label "$AM_LABEL")
 fi

@@ -133,6 +133,77 @@ PENDING_AM='[{"number":30,"headRefName":"loop/issue-9","reviewDecision":"REVIEW_
   [[ "$output" == *"pr merge 30"* ]]
 }
 
+# --- Fix round 1: レビュー指摘の回帰テスト ----------------------------------
+# 指摘1: L3 merge 失敗分岐（firing:98-100 相当）にテストが無かった。gh スタブに
+# 選択的なノブ（GH_PR_MERGE_EXIT）を追加し、pr merge だけを狙って失敗させて
+# カバーする
+
+@test "L3 merge が失敗したら STATE と needs-human ラベルを記録し、成功として報告しない" {
+  printf 'maturity = "L3"\n[agent]\nprovider = "mock"\n' > "$LOOP_DIR/config.toml"
+  GH_PR_LIST_JSON="$APPROVED_AM" GH_ISSUE_LIST_JSON='[]' GH_PR_MERGE_EXIT=1 \
+    run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+  # 成功したかのような報告（stdout の "auto-merged"）は出ない
+  [[ "$output" != *"auto-merged"* ]]
+
+  run cat "$REPO_ROOT/loops/STATE.md"
+  [[ "$output" == *"L3 自動 merge に失敗: PR #30"* ]]
+
+  run cat "$GH_LOG"
+  [[ "$output" == *"pr merge 30"* ]]
+  [[ "$output" == *"issue edit 9 --add-label needs-human"* ]]
+
+  [ -f "$REPO_ROOT/loops/.merge-failed-30" ]
+}
+
+# 指摘2: merge 失敗は一過性とは限らない（branch protection / conflict は
+# tick を跨いでも解消しない）ため、gate-remediation と同じマーカー方式で
+# 「記録は PR ごとに高々1回、merge のリトライ自体は毎tick静かに続ける」を
+# 確認する
+
+@test "L3 merge が持続的に失敗し続けても STATE 記録は高々1回、merge 自体は毎tick再試行される（3 tick）" {
+  printf 'maturity = "L3"\n[agent]\nprovider = "mock"\n' > "$LOOP_DIR/config.toml"
+  export GH_PR_LIST_JSON="$APPROVED_AM"
+  export GH_ISSUE_LIST_JSON='[]'
+  export GH_PR_MERGE_EXIT=1
+
+  run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+  run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+  run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+
+  run bash -c "grep -c 'L3 自動 merge に失敗' \"$REPO_ROOT/loops/STATE.md\""
+  [ "$output" -eq 1 ]
+
+  # needs-human も 1 回だけ（記録済みマーカーがある間は付与を再試行しない）
+  run bash -c "grep -c 'issue edit 9 --add-label needs-human' \"$GH_LOG\""
+  [ "$output" -eq 1 ]
+
+  # merge そのものは毎 tick 静かにリトライされている（自己修復の可能性を残す）
+  run bash -c "grep -c '^pr merge 30 ' \"$GH_LOG\""
+  [ "$output" -eq 3 ]
+
+  [ -f "$REPO_ROOT/loops/.merge-failed-30" ]
+}
+
+@test "L3 merge が失敗記録後に成功すると、失敗マーカーは消える" {
+  printf 'maturity = "L3"\n[agent]\nprovider = "mock"\n' > "$LOOP_DIR/config.toml"
+  export GH_PR_LIST_JSON="$APPROVED_AM"
+  export GH_ISSUE_LIST_JSON='[]'
+
+  GH_PR_MERGE_EXIT=1 run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+  [ -f "$REPO_ROOT/loops/.merge-failed-30" ]
+
+  run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+  [ ! -f "$REPO_ROOT/loops/.merge-failed-30" ]
+  run cat "$GH_LOG"
+  [[ "$output" == *"pr merge 30"* ]]
+}
+
 @test "同じ issue 番号の dispatch-maker retry ログがあっても fix round の数え上げに混ざらない" {
   # dispatch-maker が一過性エラーのリトライで書く .retry.md は issue 番号で
   # 名前が付く（*-maker-issue-<N>.md / .retry.md）。fixer 側の round カウント
