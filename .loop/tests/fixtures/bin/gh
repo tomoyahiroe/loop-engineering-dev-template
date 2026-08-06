@@ -17,6 +17,11 @@ case "${1:-} ${2:-}" in
     fi
     ;;
   "issue list") echo "${GH_ISSUE_LIST_JSON:-[]}" ;;
+  # remove-label / add-label はどちらも "issue edit" に落ちるので、片方だけを
+  # 狙って失敗させることはできない（firing の「両方失敗し続ける」ケースの
+  # テストにはこれで十分。個別に落としたければ引数まで見て分岐を増やす）
+  "issue edit")    exit "${GH_ISSUE_EDIT_EXIT:-${GH_EXIT:-0}}" ;;
+  "issue comment") exit "${GH_ISSUE_COMMENT_EXIT:-${GH_EXIT:-0}}" ;;
   "pr list")    echo "${GH_PR_LIST_JSON:-[]}" ;;
   "pr view")    echo "${GH_PR_VIEW_JSON:-$DEFAULT_PR_VIEW_JSON}" ;;
   "pr merge")   ;;

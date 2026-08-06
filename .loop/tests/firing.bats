@@ -110,7 +110,7 @@ GOOD_ISSUE_JSON='{"body":"## 背景\nx\n\n## 受け入れ基準\n- [ ] `pnpm tes
 
 # --- ここから brief が明示していないギャップを埋めるテスト -----------------
 
-@test "仕事がない tick は STATE にも loops/runs/ にも一切痕跡を残さない（バイト単位で確認）" {
+@test "仕事がない tick は STATE にも loops/runs/ にも gate-fail マーカーにも一切痕跡を残さない（バイト単位で確認）" {
   cp "$REPO_ROOT/loops/STATE.md" "$TMP/state-before.md"
 
   GH_ISSUE_LIST_JSON='[]' run "$LOOP_REAL_DIR/bin/firing"
@@ -120,6 +120,11 @@ GOOD_ISSUE_JSON='{"body":"## 背景\nx\n\n## 受け入れ基準\n- [ ] `pnpm tes
   [ "$status" -eq 0 ]
 
   run bash -c 'ls -A "$0" 2>/dev/null | wc -l | tr -d " "' "$REPO_ROOT/loops/runs"
+  [ "$output" = "0" ]
+
+  # fix round 2 で導入した gate-fail マーカー（loops/.gate-failed-<N>）も、
+  # 仕事がない tick では一切作られない
+  run bash -c "ls -A '$REPO_ROOT/loops'/.gate-failed-* 2>/dev/null | wc -l | tr -d ' '"
   [ "$output" = "0" ]
 }
 
@@ -216,18 +221,19 @@ EOF
 
 # --- Fix round 1: レビュー指摘の回帰テスト ----------------------------------
 
-@test "gate 不合格の remediation は複数 tick に渡っても高々 1 回のコメント/STATE記録に留まる" {
+@test "gate 不合格の remediation は複数 tick に渡っても高々 1 回のコメント/STATE記録に留まる（2 tick）" {
   export GH_ISSUE_JSON='{"body":"中身がない","state":"OPEN"}'
+  export GH_ISSUE_LIST_JSON='[{"number":5}]'
 
-  # tick 1: needs-human はまだ付いていない → 通常どおり remediate する
-  # （ready 除去 + needs-human 付与 + コメント 1 件 + STATE 1 行）
-  GH_ISSUE_LIST_JSON='[{"number":5,"labels":[]}]' run "$LOOP_REAL_DIR/bin/firing"
+  # tick 1: マーカーがまだない → 通常どおり remediate する
+  # （ready 除去 + コメント成功 → needs-human 付与 + マーカー書き込み + STATE 1 行）
+  run "$LOOP_REAL_DIR/bin/firing"
   [ "$status" -eq 0 ]
 
-  # tick 2: 「前回 loop:ready の除去が失敗し、Issue がまた ready 一覧に出てきた」
-  # 状況を再現する。needs-human は（tick 1 で付与済みなので）既に付いている
-  GH_ISSUE_LIST_JSON='[{"number":5,"labels":[{"name":"needs-human"}]}]' \
-    run "$LOOP_REAL_DIR/bin/firing"
+  # tick 2: 同じ Issue がまた ready 一覧に出てきた状況を再現する（例: 前回
+  # --remove-label loop:ready が失敗した）。マーカーはローカルファイルとして
+  # 実際に $REPO_ROOT/loops に残っているので、gh 側の状態を偽装する必要はない
+  run "$LOOP_REAL_DIR/bin/firing"
   [ "$status" -eq 0 ]
 
   run bash -c "grep -c '^issue comment 5 ' \"$GH_LOG\""
@@ -240,6 +246,8 @@ EOF
   # （自己修復の手段を残すため）
   run bash -c "grep -c '^issue edit 5 --remove-label loop:ready' \"$GH_LOG\""
   [ "$output" -eq 2 ]
+
+  [ -f "$REPO_ROOT/loops/.gate-failed-5" ]
 }
 
 @test "N_TODAY はリトライログを二重カウントしない（1 回の dispatch が retry しても 1 件）" {
@@ -252,4 +260,95 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" != *"日次上限"* ]]
   [[ "$output" == *"DRY RUN: #5 を dispatch する"* ]]
+}
+
+# --- Fix round 2: レビュー指摘の回帰テスト -----------------------------------
+# round 1 の「needs-human ラベルの有無」による冪等性判定は、判定材料自体が
+# gh 呼び出し（失敗し得る）で決まるため、2 つの新しい失敗モードを生んでいた。
+# ローカルマーカーファイル方式への切り替えで両方を塞いだことを確認する
+
+@test "コメント投稿が tick 1 で失敗し tick 2 で成功する場合、説明は最終的に届き STATE は 1 行だけになる" {
+  export GH_ISSUE_JSON='{"body":"中身がない","state":"OPEN"}'
+  export GH_ISSUE_LIST_JSON='[{"number":5}]'
+
+  # tick 1: コメント投稿だけ失敗させる（ready 除去・後段の needs-human 付与は
+  # 成功する状況を再現）。round 1 の実装ならここで「remediate 済み」と誤認して
+  # 以後二度とコメントを試みなくなっていた（今回のレビューで発見された新規バグ）
+  GH_ISSUE_COMMENT_EXIT=1 run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+  # コメントは失敗した扱いなので、マーカーもSTATE記録もまだ無い
+  [ ! -f "$REPO_ROOT/loops/.gate-failed-5" ]
+  run cat "$REPO_ROOT/loops/STATE.md"
+  [[ "$output" != *"dispatch 中止 #5"* ]]
+
+  # tick 2: コメントが成功するようになった（一過性障害が解消した想定）
+  run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+
+  # 説明は最終的にちゃんと届き、STATE には 1 行だけ記録される
+  [ -f "$REPO_ROOT/loops/.gate-failed-5" ]
+  run bash -c "grep -c 'dispatch 中止 #5' \"$REPO_ROOT/loops/STATE.md\""
+  [ "$output" -eq 1 ]
+}
+
+@test "remove-label も add-label も 3 tick 連続で失敗し続けても、コメント/STATE記録は高々 1 回に留まる" {
+  export GH_ISSUE_JSON='{"body":"中身がない","state":"OPEN"}'
+  export GH_ISSUE_LIST_JSON='[{"number":5}]'
+  # issue edit（remove-label と add-label の両方）を恒久的に失敗させる。
+  # round 1 の実装なら「needs-human が付かない → 未remediate と誤認」が
+  # 毎 tick 続き、コメント・STATE 記録が無限に増殖していた
+  export GH_ISSUE_EDIT_EXIT=1
+
+  run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+  run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+  run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+
+  run bash -c "grep -c '^issue comment 5 ' \"$GH_LOG\""
+  [ "$output" -eq 1 ]
+  run bash -c "grep -c 'dispatch 中止 #5' \"$REPO_ROOT/loops/STATE.md\""
+  [ "$output" -eq 1 ]
+  # loop:ready の除去は自己修復のため 3 tick とも試みられている
+  run bash -c "grep -c '^issue edit 5 --remove-label loop:ready' \"$GH_LOG\""
+  [ "$output" -eq 3 ]
+}
+
+@test "既存の 2 tick 冪等性テストは変わらず通る（マーカー方式でも回帰しないことの確認）" {
+  export GH_ISSUE_JSON='{"body":"中身がない","state":"OPEN"}'
+  export GH_ISSUE_LIST_JSON='[{"number":5}]'
+
+  run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+  run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+
+  run bash -c "grep -c '^issue comment 5 ' \"$GH_LOG\""
+  [ "$output" -eq 1 ]
+  run bash -c "grep -c 'dispatch 中止 #5' \"$REPO_ROOT/loops/STATE.md\""
+  [ "$output" -eq 1 ]
+}
+
+@test "仕事がない tick は fix round 2 のあとも STATE に一切痕跡を残さない（回帰確認）" {
+  cp "$REPO_ROOT/loops/STATE.md" "$TMP/state-before.md"
+  GH_ISSUE_LIST_JSON='[]' run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+  run cmp -s "$TMP/state-before.md" "$REPO_ROOT/loops/STATE.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "gate に通ったら過去の gate-fail マーカーは片付く（regression 時に再度 remediate できるように）" {
+  export GH_ISSUE_JSON='{"body":"中身がない","state":"OPEN"}'
+  export GH_ISSUE_LIST_JSON='[{"number":5}]'
+
+  run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+  [ -f "$REPO_ROOT/loops/.gate-failed-5" ]
+
+  # Issue が編集されて gate を通るようになった
+  export GH_ISSUE_JSON="$GOOD_ISSUE_JSON"
+  run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+  [ ! -f "$REPO_ROOT/loops/.gate-failed-5" ]
 }

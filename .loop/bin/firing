@@ -32,10 +32,7 @@ fi
 [ "$DRY" = 0 ] && "$BIN_DIR/cleanup-merged" || true
 
 # --- 2. 状況の収集 ---------------------------------------------------------
-# labels も一緒に取る。選ばれた Issue が既に needs-human 済みか
-# （= 過去の tick で gate remediation 済みか）を、後続の gate 再検証で
-# 追加の gh 呼び出しをせずに判定するため
-READY_JSON="$(gh issue list --label loop:ready --state open --json number,labels 2>/dev/null || echo '[]')"
+READY_JSON="$(gh issue list --label loop:ready --state open --json number 2>/dev/null || echo '[]')"
 NEXT_ISSUE="$(printf '%s' "$READY_JSON" | jnode '
 let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
   try{const a=JSON.parse(s);const n=a.map(x=>x.number);
@@ -86,49 +83,61 @@ fi
 # --- 5. gate 再検証（Issue は MTG 後に編集されうる） ------------------------
 GRC=0
 GOUT="$("$BIN_DIR/loop-gate" "$NEXT_ISSUE" 2>&1)" || GRC=$?
+# remediation 済みかどうかの印は、GitHub 側のラベル状態ではなく、この
+# リポジトリが所有するローカルなマーカーファイルに持たせる。
+# 理由: 「remediate 済みか」を needs-human ラベルの有無で判定すると、その
+# 判定材料自体が gh 呼び出し（失敗し得る）で決まってしまう。具体的には
+# (a) コメント投稿だけが失敗し needs-human 付与は成功すると、次 tick は
+#     「remediate 済み」と誤認してコメントを二度と再試行しない
+#     （human への説明が永遠に届かない： round 2 で発見された新規バグ）
+# (b) needs-human 付与自体が（remove-label と一緒に）恒久的に失敗し続ける
+#     と、「remediate 済み」と判定されず、毎 tick コメント + STATE 記録が
+#     増殖し続ける（round 1 で残していた無制限の残存リスク）
+# ローカルファイルの存在確認はネットワーク越しの gh 呼び出しのように
+# 一過性失敗しないため、両方を塞げる
+MARKER="loops/.gate-failed-$NEXT_ISSUE"
 if [ "$GRC" -ne 0 ]; then
   MSG="dispatch 中止 #$NEXT_ISSUE (gate 不合格。ready を剥がして needs-human)"
   if [ "$DRY" = 1 ]; then echo "DRY RUN: $MSG"; echo "$GOUT"; exit 0; fi
 
-  # 冪等性: needs-human が既に付いているなら、この Issue は過去の tick で
-  # 既に一度 remediate 済み（コメント・STATE 記録も済み）である。それでも
-  # また ready の一覧に出てきたということは、前回 --remove-label loop:ready
-  # が失敗した（ネットワーク瞬断・レート制限等）だけで、Issue の状態自体は
-  # 変わっていない。ここで毎 tick コメント/STATE 記録を繰り返すと、
-  # 1 日 12 回のペースで自己増殖するスパムになり自己修復しない。
-  # → needs-human の有無を「remediate 済み」の印として使い、コメントと
-  # STATE 記録は最初の 1 回だけに絞る。loop:ready の除去だけは毎回試みる
-  # （これが成功すれば次 tick からは ready 一覧に出てこなくなり、
-  # スパムの根本原因が解消する）
-  HAS_NEEDS_HUMAN="$(printf '%s' "$READY_JSON" | jnode "
-let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{
-  try{const a=JSON.parse(s);const hit=a.find(x=>String(x.number)===String($NEXT_ISSUE));
-    const labels=(hit&&hit.labels)||[];
-    process.stdout.write(labels.some(l=>l&&l.name==='needs-human')?'1':'0');}
-  catch{process.stdout.write('0')}})")"
-
+  # ready の除去は唯一の自己修復手段（成功すれば次 tick から ready 一覧に
+  # 出てこなくなる）なので、マーカーの有無に関わらず毎 tick 必ず試みる
   REMOVE_FAILED=0
   gh issue edit "$NEXT_ISSUE" --remove-label loop:ready >/dev/null 2>&1 || REMOVE_FAILED=1
 
-  if [ "$HAS_NEEDS_HUMAN" = "1" ]; then
-    # 既に remediate 済み。除去のリトライだけ行い、コメント・STATE 記録は
-    # 増やさない（初回のコメントで既に「ready を剥がして needs-human」と
-    # 人間には伝わっている）
+  if [ -f "$MARKER" ]; then
+    # 既に一度 remediate 済み（= コメント投稿まで成功済み）。除去の
+    # リトライだけ行い、コメント・STATE 記録は増やさない
+    exit 0
+  fi
+
+  # 未 remediate（今回が初回、またはコメントがまだ一度も成功していない）。
+  # コメントを先に投稿し、それが成功した場合に限ってラベル付与・マーカー
+  # 書き込み・STATE 記録を行う。コメントが失敗したらここで exit し、
+  # マーカーを書かない＝次 tick も「未 remediate」のまま再試行される
+  # （説明が実際に届くまでリトライし続ける）
+  if [ "$REMOVE_FAILED" = 1 ]; then
+    MSG="$MSG — 注意: loop:ready の除去に失敗。次回 tick で再選定される可能性あり"
+  fi
+  if ! gh issue comment "$NEXT_ISSUE" --body "loop-gate 不合格のため dispatch を中止しました。
+
+\`\`\`
+$GOUT
+\`\`\`" >/dev/null 2>&1; then
     exit 0
   fi
 
   gh issue edit "$NEXT_ISSUE" --add-label needs-human >/dev/null 2>&1 || true
-  if [ "$REMOVE_FAILED" = 1 ]; then
-    MSG="$MSG — 注意: loop:ready の除去に失敗。次回 tick で再選定される可能性あり"
-  fi
-  gh issue comment "$NEXT_ISSUE" --body "loop-gate 不合格のため dispatch を中止しました。
-
-\`\`\`
-$GOUT
-\`\`\`"  >/dev/null 2>&1 || true
+  printf '%s: %s\n' "$(date +%Y-%m-%d)" "$MSG" > "$MARKER"
   record_state "$MSG"
   exit 0
 fi
+
+# gate に通った以上、過去の gate-fail マーカーはもう有効ではない。
+# regression（編集し直した Issue が後でまた gate に落ちる）に備えて、
+# dispatch 経路に進む前に後始末しておく（そうすれば次に落ちたときまた
+# remediate できる）
+[ "$DRY" = 0 ] && rm -f "$MARKER" 2>/dev/null || true
 
 # --- 6. L1 は報告だけ ------------------------------------------------------
 if [ "$MATURITY" = "L1" ]; then

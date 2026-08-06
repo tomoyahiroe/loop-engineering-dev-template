@@ -1,4 +1,5 @@
 node_modules/
 .loop/.preview.pid
 loops/runs/*.log
+loops/.gate-failed-*
 .DS_Store
