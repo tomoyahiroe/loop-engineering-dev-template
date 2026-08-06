@@ -141,3 +141,41 @@ teardown() {
   # 実際に dispatch-verifier まで到達し、その処理が動いたことをログの存在で確認する
   [ -f "$REPO_ROOT/loops/runs/$(date +%Y-%m-%d)-verifier-pr-30.md" ]
 }
+
+# --- ここから fix round 1（レビュー指摘への対応） ---------------------------
+
+@test "worktree パス解決に失敗しても needs-human を付ける（他の失敗経路と同じ扱いにする）" {
+  # -d チェック成功後に cd が失敗する経路（本来は TOCTOU: -d 判定と cd の間に
+  # worktree が消える競合状態）を、bats から決定的に再現するのは困難なので、
+  # 同じコード分岐を別の決定的な原因（chmod でディレクトリの実行/検索権限を
+  # 落とし、-d は真のまま cd だけを失敗させる）で踏む。分岐そのものが
+  # needs-human を付けるかどうかが焦点であり、失敗の引き金が消失か権限かは
+  # このテストの本質ではない
+  chmod 000 "$TMP/repo-issue-9"
+  run "$LOOP_REAL_DIR/bin/dispatch-fixer" 30 9 1
+  chmod 755 "$TMP/repo-issue-9"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"worktree パス解決に失敗"* ]]
+  run cat "$GH_LOG"
+  [[ "$output" == *"--add-label needs-human"* ]]
+  run tail -3 "$REPO_ROOT/loops/STATE.md"
+  [[ "$output" == *"FAILED"* ]]
+}
+
+@test "defaults.toml の tools_fixer に gh issue edit の許可が含まれる（needs-human の逃げ道を塞がない）" {
+  # fixer.md の唯一のエスカレーション手段は gh issue edit --add-label
+  # needs-human。claude provider の --allowedTools はここ（agents.claude.
+  # tools_fixer）から読むので、欠けていると本番でこの逃げ道だけが静かに
+  # ブロックされる（mock provider はツール権限を見ないのでテストでは検出
+  # できない・claude.sh 側の配線自体は Task 4 の claude-agent.bats が別途
+  # 担保している）。ここでは loop-config 経由で defaults.toml の設定値
+  # そのものを検証する（$LOOP_DIR/defaults.toml は setup() が本物からコピー
+  # したもの）
+  run "$LOOP_REAL_DIR/bin/loop-config" get agents.claude.tools_fixer
+  [ "$status" -eq 0 ]
+  found=0
+  for line in "${lines[@]}"; do
+    [ "$line" = "Bash(gh issue edit:*)" ] && found=1
+  done
+  [ "$found" -eq 1 ]
+}

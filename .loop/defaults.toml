@@ -77,7 +77,7 @@ tools_verifier = [
 tools_fixer = [
   "Read", "Glob", "Grep", "Edit", "Write",
   "Bash(git:*)", "Bash(gh pr view:*)", "Bash(gh pr diff:*)",
-  "Bash(gh pr comment:*)", "Bash(gh issue view:*)"
+  "Bash(gh pr comment:*)", "Bash(gh issue view:*)", "Bash(gh issue edit:*)"
 ]
 # プロジェクトのビルド/テストコマンドは config.toml でここに足す
 # 例: extra_tools = ["Bash(pnpm:*)", "Bash(npx:*)", "Bash(node:*)"]

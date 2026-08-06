@@ -40,6 +40,7 @@ fi
 # 済んだ時点で一度だけ正規化しておく
 RESOLVED_WT="$(cd "$WT" && pwd)" || {
   record_state "fixer pr-$PR r$ROUND FAILED (worktree パス解決に失敗: $WT)"
+  gh issue edit "$ISSUE" --add-label needs-human >/dev/null 2>&1 || true
   echo "FAILED: worktree パス解決に失敗: $WT"
   exit 1
 }
