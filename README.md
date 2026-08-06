@@ -104,6 +104,12 @@ docker compose -f docker/compose.yml exec loop gh auth login
 
 ## テスト
 
+これは開発者がホスト側（自分の Mac/Linux。コンテナの外）で直接叩くコマンドです。
+セットアップの「ターミナルを使うのはここだけ」はループ運用のための操作の話で、
+ハーネス自体の開発・変更時にホストでテストを回すのは対象外です。
+コンテナの中で実行したい場合は上の `docker compose exec loop <cmd>` を使ってください
+（依存インストール済みなので `npm install` は不要です）。
+
 ```bash
 cd .loop && npm install && npx bats tests/
 ```

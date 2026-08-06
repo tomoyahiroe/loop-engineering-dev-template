@@ -25,4 +25,8 @@ paths = [
 
 [[rules]]
 kind = "user"
-paths = ["**"]
+# "**" だけだと、多くの glob 実装は既定でドット始まりのパス要素に
+# マッチしない（bash の globstar は dotglob 無効時に隠しファイルを
+# 除外するのと同じ挙動）。".gitignore" や "loops/mtg/.gitkeep" のような
+# ドット始まりのファイルを catch-all に確実に含めるため、明示的に加える
+paths = ["**", ".*", "**/.*"]
