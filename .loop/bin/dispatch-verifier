@@ -42,9 +42,32 @@ WT="$REPO_ROOT/../$(basename "$REPO_ROOT")-verify-pr-$PR"
 # 書くと本物のエラーと区別がつかず「FAILED は無視してよい」学習を招く。
 # 良性のレースだと分かっている場合は SKIPPED として exit 0 にする。
 if [ -e "$WT" ]; then
-  record_state "verifier pr-$PR SKIPPED (既に検証中の可能性: $WT が存在)"
-  echo "SKIP: pr-$PR の検証用 worktree は既に存在する（他の起動と競合の可能性）"
-  exit 0
+  if worktree_is_claimed "verify-pr-$PR"; then
+    # 生きた所有者がいる = 本当に別の起動が検証中。良性のレースなので
+    # SKIPPED（exit 0）で、そのディレクトリには一切触れない
+    record_state "verifier pr-$PR SKIPPED (既に検証中: $WT)"
+    echo "SKIP: pr-$PR の検証用 worktree は既に使用中（他の起動と競合）"
+    exit 0
+  fi
+  # 所有者がいない（マーカーが無い、または PID が死んでいる）= 前回の起動が
+  # SIGKILL 等で落ちて残した残骸。この worktree は使い捨ての detached
+  # checkout であり、正常終了時は必ず trap で消される類のもの。
+  # 誰も所有していないなら引き取って作り直す。放置すると、この PR の検証は
+  # 二度と行われない（cleanup-merged は detached worktree を対象にせず、
+  # preview stop は preview パスしか見ないので、他に誰も片付けない）。
+  #
+  # git worktree remove を使い、rm -rf はしない。登録済みの worktree でない
+  # ものは remove が拒否するので、人間が同名のディレクトリを置いていた場合に
+  # それを消してしまうことがない（その場合は従来どおり SKIP して人間に委ねる）
+  if git worktree remove --force "$WT" >/dev/null 2>&1; then
+    git worktree prune >/dev/null 2>&1 || true
+    release_worktree "verify-pr-$PR"
+    record_state "verifier pr-$PR 所有者のいない検証用 worktree を引き取った ($WT)"
+  else
+    record_state "verifier pr-$PR SKIPPED (検証用 worktree を引き取れない。人間が確認して削除: $WT)"
+    echo "SKIP: pr-$PR の検証用 worktree を引き取れない: $WT"
+    exit 0
+  fi
 fi
 
 git worktree add --detach "$WT" main >/dev/null 2>&1 || {
@@ -58,8 +81,14 @@ git worktree add --detach "$WT" main >/dev/null 2>&1 || {
 # 静かに消える。PROMPT は空文字であっても代入自体は成功するので（$(mktemp) が
 # 万一失敗しても PROMPT は未定義にはならない）、trap 内で set -u に触れて
 # 丸ごと落ちる心配もない。
+# 検証中はこの worktree の所有権を主張する。これが無いと、SIGKILL で残った
+# 残骸と「別の起動が今まさに使っている worktree」を区別できず、上のパス存在
+# チェックがどちらも一律に SKIP になってしまう（= その PR の検証が永久に
+# 行われなくなる）
+claim_worktree "verify-pr-$PR"
+
 PROMPT="$(mktemp)"
-trap 'rm -f "$PROMPT"; git -C "$REPO_ROOT" worktree remove --force "$WT" >/dev/null 2>&1; git -C "$REPO_ROOT" worktree prune >/dev/null 2>&1' EXIT
+trap 'release_worktree "verify-pr-$PR"; rm -f "${PROMPT:-}"; git -C "$REPO_ROOT" worktree remove --force "$WT" >/dev/null 2>&1; git -C "$REPO_ROOT" worktree prune >/dev/null 2>&1' EXIT
 
 # --detach は必須。PR の head ブランチは Maker の worktree が保持しており、
 # git は同一ブランチの二重 checkout を拒否する

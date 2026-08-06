@@ -167,6 +167,81 @@ EOF
   [ ! -f "$GH_LOG" ]
 }
 
+# --- Final review: 所有者のいない残骸 worktree を引き取る --------------------
+# SIGKILL で dispatch-verifier が死ぬと、使い捨てのはずの検証用 worktree が
+# 残る。cleanup-merged は detached worktree を対象にせず、preview stop は
+# preview パスしか見ないので、誰も片付けない。旧実装はパスの存在だけで
+# 一律 SKIP していたため、その PR の検証が二度と行われなくなっていた。
+
+@test "所有者のいない残骸の検証用 worktree は引き取って検証をやり直す" {
+  # SIGKILL で残った状態を再現する（worktree は登録済み・所有者マーカーは
+  # 無い、または死んだ PID）
+  git -C "$REPO_ROOT" worktree add -q --detach "$TMP/repo-verify-pr-21" main
+  echo 999999 > "$REPO_ROOT/loops/.wt-owner-verify-pr-21"
+
+  run "$LOOP_REAL_DIR/bin/dispatch-verifier" 21
+  [ "$status" -eq 0 ]
+
+  # 実際に検証が走った（ログがあり、STATE に ok が記録される）
+  [ -f "$REPO_ROOT/loops/runs/$(date +%Y-%m-%d)-verifier-pr-21.md" ]
+  run cat "$REPO_ROOT/loops/STATE.md"
+  [[ "$output" == *"引き取った"* ]]
+  [[ "$output" == *"verifier pr-21 ok"* ]]
+
+  # 使い捨て worktree は最後に片付き、所有権マーカーも残らない
+  [ ! -d "$TMP/repo-verify-pr-21" ]
+  [ ! -f "$REPO_ROOT/loops/.wt-owner-verify-pr-21" ]
+}
+
+@test "所有者マーカーが無いだけの残骸も引き取る（旧バージョンからの移行）" {
+  git -C "$REPO_ROOT" worktree add -q --detach "$TMP/repo-verify-pr-21" main
+  run "$LOOP_REAL_DIR/bin/dispatch-verifier" 21
+  [ "$status" -eq 0 ]
+  [ -f "$REPO_ROOT/loops/runs/$(date +%Y-%m-%d)-verifier-pr-21.md" ]
+  [ ! -d "$TMP/repo-verify-pr-21" ]
+}
+
+@test "生きた所有者がいる検証用 worktree には触らず SKIPPED で 0 を返す" {
+  git -C "$REPO_ROOT" worktree add -q --detach "$TMP/repo-verify-pr-21" main
+  echo "other-invocation-marker" > "$TMP/repo-verify-pr-21/marker.txt"
+  # 生きている PID（このテストプロセス自身）を所有者として書く
+  echo $$ > "$REPO_ROOT/loops/.wt-owner-verify-pr-21"
+
+  run "$LOOP_REAL_DIR/bin/dispatch-verifier" 21
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SKIP"* ]]
+  run tail -3 "$REPO_ROOT/loops/STATE.md"
+  [[ "$output" == *"SKIPPED"* ]]
+  [[ "$output" != *"FAILED"* ]]
+
+  # 他の起動が使っているディレクトリとその中身に一切触れていない
+  [ -d "$TMP/repo-verify-pr-21" ]
+  run cat "$TMP/repo-verify-pr-21/marker.txt"
+  [[ "$output" == "other-invocation-marker" ]]
+  [ ! -f "$GH_LOG" ]
+}
+
+@test "検証中は所有権マーカーがあり、正常終了で解放される" {
+  cat > "$LOOP_DIR/agents/probe.sh" <<EOF
+#!/usr/bin/env bash
+set -uo pipefail
+if [ -f "$REPO_ROOT/loops/.wt-owner-verify-pr-21" ]; then
+  echo claimed > "$TMP/claim-state"
+else
+  echo unclaimed > "$TMP/claim-state"
+fi
+exit 0
+EOF
+  chmod +x "$LOOP_DIR/agents/probe.sh"
+  printf '[agent]\nprovider = "probe"\n\n[project]\ntest = "pnpm -r test"\nlint = "pnpm -r lint"\n' \
+    > "$LOOP_DIR/config.toml"
+
+  run "$LOOP_REAL_DIR/bin/dispatch-verifier" 21
+  [ "$status" -eq 0 ]
+  [ "$(cat "$TMP/claim-state")" = "claimed" ]
+  [ ! -f "$REPO_ROOT/loops/.wt-owner-verify-pr-21" ]
+}
+
 @test "既存パス以外の理由で worktree 作成に失敗したら FAILED を記録して 1 を返す" {
   # main ブランチ名を変えて git worktree add --detach <WT> main を
   # 「main が解決できない」という、パス存在とは無関係な genuine failure にする
