@@ -59,8 +59,32 @@ cd "$REPO_ROOT" || exit 1
 #     復旧できない）
 branch_content_is_in_main() { # $1 = ブランチ名
   local out rc merged_tree main_tree
-  # 通常の merge / fast-forward
+  # 通常の merge / fast-forward。祖先関係は merge driver の影響を受けないので
+  # この判定は常に正確
   git merge-base --is-ancestor "$1" main 2>/dev/null && return 0
+
+  # カスタム merge driver が 1 つでも設定されていたら、tree 一致による判定は
+  # 使わない（= 片付けない）。
+  #
+  # .gitattributes の `merge=<name>` と `merge.<name>.driver` の組み合わせは、
+  # lockfile や CHANGELOG を「常に ours を採用する」ために広く使われる定石。
+  # このとき merge-tree はブランチ側の変更を driver の指示どおり捨てるため、
+  # ブランチが main に無い作業を持っていてもマージ結果は main のツリーと
+  # 一致し得る（rc=0）。実測で再現済み: 双方が driver 管理下のファイルを
+  # 変更していると、ブランチの未マージの内容が結果に残らないまま
+  # 「取り込み済み」と判定され、worktree・ローカルブランチ・リモート
+  # ブランチまで削除されてしまう。
+  #
+  # 判定そのものを driver に合わせて精密化する道もあるが、このファイルの
+  # 削除は復旧不能であり、誤検出の代償が大きすぎる。driver が設定された
+  # リポジトリでは squash merge の検出を諦める（= 修正前と同じ片付け漏れに
+  # 戻るだけ。人間が気付ける残骸が増えるだけで、失われるものは無い）。
+  #
+  # git config --get-regexp は一致が無ければ 1 を返す（system/global/local の
+  # すべてのスコープを見る）
+  if git config --get-regexp '^merge\.[^.]*\.driver$' >/dev/null 2>&1; then
+    return 1
+  fi
 
   out="$(git merge-tree --write-tree main "$1" 2>/dev/null)"
   rc=$?

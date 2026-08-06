@@ -201,6 +201,23 @@ EOF
   [ ! -d "$TMP/repo-verify-pr-21" ]
 }
 
+@test "所有権マーカーが壊れていても検証は止まらない（引き取る側は逆に倒す）" {
+  # cleanup-merged（削除する側）は壊れたマーカーを「所有されている」と読んで
+  # 触らないのが正しいが、こちら（引き取る側）で同じ既定にすると、壊れた
+  # マーカー 1 つでその PR が毎 tick SKIP され、二度と検証されなくなる
+  # （finding 7 で塞いだはずの静かな恒久停止がマーカー経由で復活する）
+  git -C "$REPO_ROOT" worktree add -q --detach "$TMP/repo-verify-pr-21" main
+  printf 'not-a-pid\n' > "$REPO_ROOT/loops/.wt-owner-verify-pr-21"
+
+  run "$LOOP_REAL_DIR/bin/dispatch-verifier" 21
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"SKIP"* ]]
+  [ -f "$REPO_ROOT/loops/runs/$(date +%Y-%m-%d)-verifier-pr-21.md" ]
+  run cat "$REPO_ROOT/loops/STATE.md"
+  [[ "$output" == *"verifier pr-21 ok"* ]]
+  [ ! -d "$TMP/repo-verify-pr-21" ]
+}
+
 @test "生きた所有者がいる検証用 worktree には触らず SKIPPED で 0 を返す" {
   git -C "$REPO_ROOT" worktree add -q --detach "$TMP/repo-verify-pr-21" main
   echo "other-invocation-marker" > "$TMP/repo-verify-pr-21/marker.txt"

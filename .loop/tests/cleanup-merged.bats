@@ -372,6 +372,56 @@ make_squash_merged_wt() { # $1 = issue 番号（2 コミット持つブランチ
   [ -z "$output" ]
 }
 
+@test "カスタム merge driver が設定されていたら tree 一致判定を使わない（未マージの作業を消さない）" {
+  # .gitattributes の merge=<name> と merge.<name>.driver の組み合わせは
+  # lockfile や CHANGELOG を「常に ours」にするための定石。このとき
+  # merge-tree はブランチ側の変更を driver の指示どおり捨てるので、
+  # ブランチが main に無い作業を持っていてもマージ結果が main のツリーと
+  # 一致してしまう（レビューで実機再現された削除経路）
+  git -C "$REPO_ROOT" config merge.ours.driver true
+  printf 'lock.txt merge=ours\n' > "$REPO_ROOT/.gitattributes"
+  printf 'v1\n' > "$REPO_ROOT/lock.txt"
+  git -C "$REPO_ROOT" add -A
+  git -C "$REPO_ROOT" commit -qm "lockfile に merge driver を設定"
+
+  git -C "$REPO_ROOT" worktree add -q "$TMP/repo-issue-30" -b loop/issue-30 main
+  printf 'v2-UNMERGED-WORK\n' > "$TMP/repo-issue-30/lock.txt"
+  git -C "$TMP/repo-issue-30" commit -qam "issue 30 の未マージの作業"
+  # main 側でも同じファイルを触る（driver が実際に呼ばれる条件）
+  printf 'v1-main-side\n' > "$REPO_ROOT/lock.txt"
+  git -C "$REPO_ROOT" commit -qam "main 側でも lockfile を更新"
+
+  # 前提の確認: このブランチは main の祖先ではないが、merge-tree の結果は
+  # main のツリーと一致してしまう（= ガードが無ければ削除される）
+  run git -C "$REPO_ROOT" merge-base --is-ancestor loop/issue-30 main
+  [ "$status" -ne 0 ]
+  MERGED_TREE="$(git -C "$REPO_ROOT" merge-tree --write-tree main loop/issue-30 | head -1)"
+  MAIN_TREE="$(git -C "$REPO_ROOT" rev-parse 'main^{tree}')"
+  [ "$MERGED_TREE" = "$MAIN_TREE" ]
+
+  run "$LOOP_REAL_DIR/bin/cleanup-merged"
+  [ "$status" -eq 0 ]
+  # worktree・ブランチ・未マージの中身がすべて無事
+  [ -d "$TMP/repo-issue-30" ]
+  run git -C "$REPO_ROOT" show-ref --verify --quiet refs/heads/loop/issue-30
+  [ "$status" -eq 0 ]
+  run git -C "$REPO_ROOT" show loop/issue-30:lock.txt
+  [[ "$output" == *"v2-UNMERGED-WORK"* ]]
+}
+
+@test "merge driver 環境では通常の merge（祖先関係）の片付けは従来どおり動く" {
+  # ガードが「squash 検出だけを諦める」ものであり、祖先判定まで止めて
+  # いないことを確認する（片付け漏れを必要以上に広げない）
+  git -C "$REPO_ROOT" config merge.ours.driver true
+  make_wt 31 hello
+  git -C "$REPO_ROOT" merge -q --no-edit loop/issue-31
+  run "$LOOP_REAL_DIR/bin/cleanup-merged"
+  [ "$status" -eq 0 ]
+  [ ! -d "$TMP/repo-issue-31" ]
+  run git -C "$REPO_ROOT" show-ref --verify --quiet refs/heads/loop/issue-31
+  [ "$status" -ne 0 ]
+}
+
 @test "merge 後に main 側で revert されたブランチには触らない（安全側に倒れる）" {
   make_squash_merged_wt 17
   git -C "$REPO_ROOT" rm -q s.txt

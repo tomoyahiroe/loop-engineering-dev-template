@@ -42,7 +42,11 @@ WT="$REPO_ROOT/../$(basename "$REPO_ROOT")-verify-pr-$PR"
 # 書くと本物のエラーと区別がつかず「FAILED は無視してよい」学習を招く。
 # 良性のレースだと分かっている場合は SKIPPED として exit 0 にする。
 if [ -e "$WT" ]; then
-  if worktree_is_claimed "verify-pr-$PR"; then
+  # 第 2 引数の 1 = 「マーカーが壊れていて判断できないなら所有されていない扱い」。
+  # ここで cleanup-merged と同じ既定（触らない側）にすると、壊れたマーカー
+  # 1 つでこの PR の検証が毎 tick SKIP され、二度と行われなくなる。
+  # 使い捨ての検証用 worktree を作り直す代償は小さいので、逆側に倒す
+  if worktree_is_claimed "verify-pr-$PR" 1; then
     # 生きた所有者がいる = 本当に別の起動が検証中。良性のレースなので
     # SKIPPED（exit 0）で、そのディレクトリには一切触れない
     record_state "verifier pr-$PR SKIPPED (既に検証中: $WT)"

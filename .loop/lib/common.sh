@@ -113,15 +113,24 @@ release_worktree() { # $1 = キー
   rm -f "$(wt_owner_file "$1")" 2>/dev/null || true
 }
 
-# 生きた所有者がいるか。マーカーが壊れている等で判断できない場合は
-# 「所有されている」= 触らない側に倒す（cleanup-merged の中心的な原則）
-worktree_is_claimed() { # $1 = キー
-  local f pid
+# 生きた所有者がいるか。
+#
+# $2 = マーカーが壊れていて判断できないときの答え（既定 0 = 所有されている扱い）。
+# 「安全側」がどちらかは呼び出し側で逆になるので、既定に任せず明示する:
+#   - cleanup-merged（削除する側）: 既定の 0。判断できないなら消さない。
+#     削除は復旧不能なので、疑わしきは触らない
+#   - dispatch-verifier（引き取る側）: 1 を渡す。壊れたマーカーを
+#     「使用中」と読むと、その PR の検証が毎 tick SKIP され二度と行われない
+#     （まさに finding 7 で塞いだ静かな恒久停止）。使い捨ての worktree を
+#     取り違えて作り直す代償は小さいので、こちらは「所有されていない」に倒す
+worktree_is_claimed() { # $1 = キー, $2 = 判断できないときの戻り値
+  local f pid unknown
+  unknown="${2:-0}"
   f="$(wt_owner_file "$1")"
   [ -f "$f" ] || return 1
   pid="$(head -1 "$f" 2>/dev/null)"
   case "$pid" in
-    ''|*[!0-9]*) return 0 ;;
+    ''|*[!0-9]*) return "$unknown" ;;
   esac
   kill -0 "$pid" 2>/dev/null
 }
