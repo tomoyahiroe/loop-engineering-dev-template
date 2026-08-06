@@ -72,6 +72,56 @@ PENDING_AM='[{"number":30,"headRefName":"loop/issue-9","reviewDecision":"REVIEW_
   [[ "$output" == *"--add-label needs-human"* ]]
 }
 
+# --- Final review: auto_fix_rounds は「PR あたり」であって「1 日あたり」では
+# ない。日付で数えていた旧実装では、恒久的に詰まった PR に毎日新しい有料の
+# ラウンドが無期限に割り当てられ、上限到達の分岐は毎 tick 同じ STATE 行と
+# needs-human の再付与を繰り返していた（L3 merge 失敗と同じスパム） --------
+
+@test "auto_fix_rounds は日付をまたいで数える（前日に消化済みなら今日は回さない）" {
+  # 別の日付の fixer ログ = その PR では既に 1 ラウンド消化済み
+  touch "$REPO_ROOT/loops/runs/2020-01-01-fixer-pr-30-r1.md"
+  GH_PR_LIST_JSON="$CHANGES_PR" GH_ISSUE_LIST_JSON='[]' run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+  [ ! -f "$REPO_ROOT/loops/runs/$(date +%Y-%m-%d)-fixer-pr-30-r1.md" ]
+  [ ! -f "$REPO_ROOT/loops/runs/$(date +%Y-%m-%d)-fixer-pr-30-r2.md" ]
+  run cat "$REPO_ROOT/loops/STATE.md"
+  [[ "$output" == *"自動修正の上限"* ]]
+}
+
+@test "上限到達が続いても STATE 記録と needs-human は高々 1 回（3 tick）" {
+  touch "$REPO_ROOT/loops/runs/$(date +%Y-%m-%d)-fixer-pr-30-r1.md"
+  export GH_PR_LIST_JSON="$CHANGES_PR"
+  export GH_ISSUE_LIST_JSON='[]'
+
+  run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+  run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+  run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+
+  run bash -c "grep -c '自動修正の上限' \"$REPO_ROOT/loops/STATE.md\""
+  [ "$output" -eq 1 ]
+  run bash -c "grep -c 'issue edit 9 --add-label needs-human' \"$GH_LOG\""
+  [ "$output" -eq 1 ]
+  [ -f "$REPO_ROOT/loops/.fix-exhausted-30" ]
+  # 新しいラウンドは 1 つも回っていない（有料の実行を毎 tick 増やさない）
+  [ ! -f "$REPO_ROOT/loops/runs/$(date +%Y-%m-%d)-fixer-pr-30-r2.md" ]
+}
+
+@test "auto_fix_rounds を上げれば上限マーカーは片付き、次のラウンドが回る" {
+  touch "$REPO_ROOT/loops/runs/$(date +%Y-%m-%d)-fixer-pr-30-r1.md"
+  GH_PR_LIST_JSON="$CHANGES_PR" GH_ISSUE_LIST_JSON='[]' run "$LOOP_REAL_DIR/bin/firing"
+  [ -f "$REPO_ROOT/loops/.fix-exhausted-30" ]
+
+  # 人間が上限を引き上げた
+  printf '[agent]\nprovider = "mock"\n\n[loop]\nauto_fix_rounds = 2\n' > "$LOOP_DIR/config.toml"
+  GH_PR_LIST_JSON="$CHANGES_PR" GH_ISSUE_LIST_JSON='[]' run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+  [ -f "$REPO_ROOT/loops/runs/$(date +%Y-%m-%d)-fixer-pr-30-r2.md" ]
+  [ ! -f "$REPO_ROOT/loops/.fix-exhausted-30" ]
+}
+
 @test "auto_fix_rounds = 0 なら Fixer を回さない" {
   printf '[agent]\nprovider = "mock"\n\n[loop]\nauto_fix_rounds = 0\n' > "$LOOP_DIR/config.toml"
   GH_PR_LIST_JSON="$CHANGES_PR" GH_ISSUE_LIST_JSON='[]' run "$LOOP_REAL_DIR/bin/firing"

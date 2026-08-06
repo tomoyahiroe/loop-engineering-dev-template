@@ -67,13 +67,30 @@ if [ "$DRY" = 0 ] && [ "$MATURITY" != "L1" ] && [ "$AUTO_FIX_ROUNDS" -gt 0 ] 2>/
     # glob は "-fixer-pr-<N>-r" というプレフィックスを固定しているので、
     # dispatch-maker が書く *-maker-issue-<N>.retry.md のような無関係な
     # ログとは衝突しない（N_TODAY の二重カウント事故の教訓を踏まえ、ここでも
-    # 意図的にプレフィックスを厳密にしている）
-    DONE_ROUNDS="$(ls "loops/runs/$DATE"-fixer-pr-"$FPR"-r*.md 2>/dev/null | wc -l | tr -d ' ')"
+    # 意図的にプレフィックスを厳密にしている）。
+    #
+    # 日付は含めない。auto_fix_rounds は「その PR に何ラウンドまで自動修正を
+    # 試すか」であって「1 日あたり何ラウンドか」ではない。日付で区切ると、
+    # 恒久的に詰まった PR に毎日新しい有料のラウンドが無期限に割り当てられる
+    DONE_ROUNDS="$(ls loops/runs/*-fixer-pr-"$FPR"-r*.md 2>/dev/null | wc -l | tr -d ' ')"
     if [ "$DONE_ROUNDS" -ge "$AUTO_FIX_ROUNDS" ]; then
-      record_state "pr-$FPR 自動修正の上限 ($DONE_ROUNDS/$AUTO_FIX_ROUNDS) — needs-human"
-      gh issue edit "$FISSUE" --add-label needs-human >/dev/null 2>&1 || true
+      # 上限到達は tick を跨いでも自然には解消しない（人間が直すまで PR は
+      # request-changes のまま毎 tick ここに来る）。何もしないと同じ STATE 行と
+      # needs-human の再付与を 1 日 12 回、無期限に繰り返す。L3 merge 失敗と
+      # 同じローカルマーカー方式で 1 回に抑える。順序も同じ原則:
+      # 「以後の報告を抑制する操作（マーカー作成）は informative な手より後」
+      FXMARKER="loops/.fix-exhausted-$FPR"
+      if [ ! -f "$FXMARKER" ]; then
+        record_state "pr-$FPR 自動修正の上限 ($DONE_ROUNDS/$AUTO_FIX_ROUNDS) — needs-human"
+        gh issue edit "$FISSUE" --add-label needs-human >/dev/null 2>&1 || true
+        touch "$FXMARKER" 2>/dev/null || true
+      fi
       continue
     fi
+    # まだラウンドが残っている = 過去の「上限到達」記録はもう有効ではない
+    # （人間が auto_fix_rounds を上げた場合など）。次に使い切ったとき、また
+    # 1 回だけ報告できるように片付けておく
+    rm -f "loops/.fix-exhausted-$FPR" 2>/dev/null || true
     NEXT_ROUND=$((DONE_ROUNDS + 1))
     echo "firing: dispatching fixer for PR #$FPR (round $NEXT_ROUND)"
     "$BIN_DIR/dispatch-fixer" "$FPR" "$FISSUE" "$NEXT_ROUND" || true

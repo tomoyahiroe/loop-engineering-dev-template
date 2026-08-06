@@ -6,5 +6,6 @@ loops/.gate-failed-*
 loops/.merge-failed-*
 loops/.tools-misconfig
 loops/.inflight-skip-*
+loops/.fix-exhausted-*
 loops/.wt-owner-*
 .DS_Store
