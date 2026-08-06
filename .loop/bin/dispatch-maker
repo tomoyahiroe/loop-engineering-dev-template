@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Maker を headless 起動する。PR ができたら Verifier をチェーンする。
+# 用法: dispatch-maker <issue-number>
+set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
+BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$REPO_ROOT" || exit 1
+
+ISSUE="${1:-}"
+[ -n "$ISSUE" ] || { echo "用法: dispatch-maker <issue-number>" >&2; exit 2; }
+
+MATURITY="$(cfg maturity)"
+if [ "$MATURITY" = "L1" ]; then
+  echo "REFUSED: maturity=L1（報告のみ）。昇格は .loop/config.toml を人間が編集して行う"
+  exit 1
+fi
+
+"$BIN_DIR/budget-check" || { echo "SKIP: 予算ゲート"; exit 1; }
+
+WT="$REPO_ROOT/../$(basename "$REPO_ROOT")-issue-$ISSUE"
+BRANCH="loop/issue-$ISSUE"
+
+if [ -d "$WT" ] || git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+  record_state "maker issue-$ISSUE SKIPPED (既に in-flight: worktree/branch が存在)"
+  echo "SKIP: issue-$ISSUE は既に in-flight"
+  exit 0
+fi
+
+git worktree add "$WT" -b "$BRANCH" main || {
+  record_state "maker issue-$ISSUE FAILED (worktree 作成に失敗)"
+  exit 1
+}
+gh issue edit "$ISSUE" --remove-label loop:ready >/dev/null 2>&1 || true
+
+PROMPT="$(mktemp)"
+trap 'rm -f "$PROMPT"' EXIT
+render_prompt "$LOOP_DIR/prompts/maker.md" \
+  "ISSUE=$ISSUE" \
+  "TEST_CMD=$(cfg project.test || echo '')" \
+  "LINT_CMD=$(cfg project.lint || echo '')" > "$PROMPT"
+
+LOG="loops/runs/$(date +%Y-%m-%d)-maker-issue-$ISSUE.md"
+
+run_maker() {
+  "$BIN_DIR/agent-run" --role maker --prompt-file "$PROMPT" --cwd "$WT" --log "$LOG"
+}
+
+RC=0
+run_maker || RC=$?
+
+# 一過性エラーは 1 回だけ自動リトライ。worktree が手つかず（未コミット変更なし・
+# main から進んでいない）のときだけ。作業途中で死んだ WIP は残置して人間が確認する
+if [ "$RC" -ne 0 ] && is_transient_error "$LOG" \
+   && [ -z "$(git -C "$WT" status --porcelain)" ] \
+   && [ "$(git -C "$WT" rev-parse HEAD)" = "$(git rev-parse main)" ]; then
+  DELAY="$(retry_delay)"
+  record_state "maker issue-$ISSUE 一過性エラー — ${DELAY}s 後に 1 回リトライ"
+  sleep "$DELAY"
+  RC=0
+  run_maker || RC=$?
+fi
+
+if [ "$RC" -ne 0 ]; then
+  record_state "maker issue-$ISSUE FAILED rc=$RC (log: $LOG)"
+  gh issue edit "$ISSUE" --add-label needs-human >/dev/null 2>&1 || true
+  echo "maker FAILED rc=$RC -> $LOG（worktree $WT は残置。人間が WIP を確認する）"
+  exit 1
+fi
+
+# --jq には依存しない（gh のビルドによっては使えないため）。firing と同じく node で取り出す
+PR="$(gh pr list --head "$BRANCH" --state open --json number,headRefName 2>/dev/null \
+  | node -e "
+let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{
+  try{const a=JSON.parse(s);
+    const hit=a.find(p=>String(p.headRefName)==='$BRANCH')||a[0];
+    process.stdout.write(hit&&hit.number?String(hit.number):'');}
+  catch{process.stdout.write('')}})")"
+
+if [ -z "$PR" ]; then
+  record_state "maker issue-$ISSUE 完了したが PR なし (log: $LOG)"
+  gh issue edit "$ISSUE" --add-label needs-human >/dev/null 2>&1 || true
+  echo "maker done (PR なし) -> $LOG"
+  exit 0
+fi
+
+record_state "maker issue-$ISSUE ok -> PR #$PR (log: $LOG)"
+echo "maker done -> $LOG / PR #$PR"
+
+if [ "${LOOP_SKIP_VERIFIER:-0}" = "1" ]; then
+  exit 0
+fi
+echo "chain: dispatch-verifier for PR #$PR"
+"$BIN_DIR/dispatch-verifier" "$PR" || true
