@@ -78,7 +78,10 @@ fi
 if [ "$RC" -ne 0 ]; then
   record_state "maker issue-$ISSUE FAILED rc=$RC (log: $LOG)"
   gh issue edit "$ISSUE" --add-label needs-human >/dev/null 2>&1 || true
-  echo "maker FAILED rc=$RC -> $LOG（worktree $WT は残置。人間が WIP を確認する）"
+  # 変数展開の直後に全角文字を置くときは必ず ${} で括る。$LOG（ と書くと
+  # bash（3.2 / 5.x とも、UTF-8 ロケール）は全角括弧を変数名の一部として
+  # 読み、set -u 下で "unbound variable" になってこの行が実行されない
+  echo "maker FAILED rc=$RC -> ${LOG}（worktree ${WT} は残置。人間が WIP を確認する）"
   exit 1
 fi
 

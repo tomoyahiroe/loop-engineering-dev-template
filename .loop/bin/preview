@@ -131,7 +131,9 @@ case "${1:-}" in
       fi
     fi
     if [ "$STOP_FAILED" -eq 1 ]; then
-      echo "停止に失敗しました: プロセス（pid $PID）がまだ残っている可能性があります" >&2
+      # ${PID} と括るのは必須。$PID）と書くと bash が全角括弧まで変数名として
+      # 読み、set -u 下で "unbound variable" になってこの行が実行されない
+      echo "停止に失敗しました: プロセス（pid ${PID}）がまだ残っている可能性があります" >&2
     else
       rm -f "$PID_FILE" "$META_FILE"
     fi

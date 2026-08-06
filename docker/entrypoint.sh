@@ -40,7 +40,7 @@ if [ ! -x "$LOOP_DIR/bin/gen-crontab" ]; then
     "        cd <リポジトリのルート> && docker compose -f docker/compose.yml up -d" \
     "  - docker/compose.yml の working_dir とホストのマウント先の絶対パスが一致していない" \
     "  - このリポジトリに .loop（dev-loop ハーネス）が入っていない、または壊れている" \
-    "  - REPO_ROOT 環境変数が誤ったパスを指している（現在値: $REPO_ROOT）"
+    "  - REPO_ROOT 環境変数が誤ったパスを指している（現在値: ${REPO_ROOT}）"
 fi
 
 NODE_MODULES_DIR="$LOOP_DIR/node_modules"
