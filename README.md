@@ -35,6 +35,22 @@ docker compose -f docker/compose.yml exec loop gh auth login
 限り 2 回目以降は不要です。ここから先、ターミナルを開く必要は基本的にありません
 — ループは cron（supercronic）が自動で起こします。
 
+続いて、ループが動くのに必要な 3 つのラベルを GitHub 側に作ります（**必須**）。
+
+```bash
+docker compose -f docker/compose.yml exec loop bash -lc '
+gh label create loop:ready      --color 0E8A16 --description "ゲート通過済み。次の firing で着手する" --force
+gh label create needs-human     --color D93F0B --description "人間の判断が要る。ループは触らない"      --force
+gh label create loop:auto-merge --color 1D76DB --description "L3 で自動 merge を許可する（人間が付ける）" --force
+'
+```
+
+`--force` を付けているので、既にあるラベルは更新されるだけです（何度実行しても安全）。
+
+このハーネスはラベルの付け外しをすべて best-effort（失敗しても実行を止めない）で
+行います。**ラベルが存在しないと、待ち行列（`loop:ready`）もエスカレーション
+（`needs-human`）も、エラーを出さないまま機能しません。** ここは飛ばさないでください。
+
 続いて、この 3 つを自分のプロジェクトに合わせて編集します。
 
 1. `.loop/config.toml` — **2 か所をセットで**書き換えます
