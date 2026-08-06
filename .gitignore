@@ -1,5 +1,6 @@
 node_modules/
-.loop/.preview.pid
+loops/.preview.pid
+loops/.preview.meta
 loops/runs/*.log
 loops/.gate-failed-*
 loops/.merge-failed-*
