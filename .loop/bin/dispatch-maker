@@ -32,6 +32,12 @@ if [ -d "$WT" ] || git show-ref --verify --quiet "refs/heads/$BRANCH"; then
   exit 0
 fi
 
+# ツール許可の確認も、ローカルな設定を読むだけの安価な処理なので
+# budget-check より先に置く。in-flight チェックより後なのは、既に走っている
+# 実行の loop:ready を剥がし直す自己修復（上の skip 分岐）を、設定ミスで
+# 止めてしまわないため
+require_project_tools_allowed || exit 1
+
 "$BIN_DIR/budget-check" || { echo "SKIP: 予算ゲート"; exit 1; }
 
 git worktree add "$WT" -b "$BRANCH" main || {

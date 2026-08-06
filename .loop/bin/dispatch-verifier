@@ -16,6 +16,12 @@ if [ "$MATURITY" = "L1" ]; then
   exit 1
 fi
 
+# {{TEST_CMD}} / {{LINT_CMD}} を実行できないまま Verifier を起動すると、
+# diff を読むだけの「テストを 1 つも走らせないレビュー」になる。それは
+# このハーネスの主要な品質シグナルが静かに無効化された状態なので、
+# 起動を拒否する（ローカルな設定を読むだけなので budget-check より先）
+require_project_tools_allowed || exit 1
+
 GATE_RC=0
 GATE="$("$BIN_DIR/budget-check")" || GATE_RC=$?
 echo "$GATE"

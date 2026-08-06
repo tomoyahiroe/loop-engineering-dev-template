@@ -79,6 +79,11 @@ tools_fixer = [
   "Bash(git:*)", "Bash(gh pr view:*)", "Bash(gh pr diff:*)",
   "Bash(gh pr comment:*)", "Bash(gh issue view:*)", "Bash(gh issue edit:*)"
 ]
-# プロジェクトのビルド/テストコマンドは config.toml でここに足す
+# プロジェクトのビルド/テストコマンドは config.toml でここに足す。
 # 例: extra_tools = ["Bash(pnpm:*)", "Bash(npx:*)", "Bash(node:*)"]
+#
+# 上の tools_* には git / gh の Bash しか含まれていない。[project] の
+# test / lint を実行するには、そのコマンドの許可をここに足す必要がある
+# （足さないと Verifier がテストを 1 つも実行できないまま diff だけを見て
+# approve してしまうため、dispatch-* は起動を拒否する）
 extra_tools = []

@@ -37,7 +37,26 @@ docker compose -f docker/compose.yml exec loop gh auth login
 
 続いて、この 3 つを自分のプロジェクトに合わせて編集します。
 
-1. `.loop/config.toml` の `[project]` — test / lint / preview コマンド
+1. `.loop/config.toml` — **2 か所をセットで**書き換えます
+
+   ```toml
+   [project]
+   test = "pnpm -r test"      # あなたのプロジェクトのテストコマンド
+   lint = "pnpm -r lint"      # 同 lint コマンド
+   preview = "pnpm dev"       # 任意（MTG で実際に動かして見るため）
+
+   [agents.claude]
+   # ↑ の test / lint を実行するための許可。空のままにしない
+   extra_tools = ["Bash(pnpm:*)", "Bash(npx:*)", "Bash(node:*)"]
+   ```
+
+   エージェントに既定で許可されているツールは `git` と `gh` だけです。
+   `extra_tools` にプロジェクトのツールチェーンを足さないと、**Verifier は
+   テストを 1 つも実行できず、diff を読むだけでレビューする**ことになります
+   （ハーネスの主要な品質シグナルが静かに無効化されます）。
+   そのため、`test` / `lint` が設定されているのに `extra_tools` が空の場合、
+   ループは dispatch を拒否し、理由を `loops/STATE.md` に記録します。
+   テストや lint を持たないプロジェクトなら `test` / `lint` を `""` にしてください。
 2. `docker/Dockerfile` — プロジェクトのツールチェーン（追記して `--build` で再ビルド）
 3. `CLAUDE.md` — ビルド手順と規約
 

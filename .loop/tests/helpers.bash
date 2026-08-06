@@ -39,6 +39,27 @@ use_mock_agent() {
     > "$LOOP_DIR/config.toml"
 }
 
+# claude provider を有効にする。実物の agents/claude.sh とプロンプトを
+# fixture にコピーし、PATH には fixtures/bin の claude スタブを置く。
+# config.toml は呼び出し側が書く（ツール許可リストの検証が目的のため）。
+# mock provider は許可リストを一切見ないので、その手のガードは mock では
+# 踏めない。provider = "claude" を使うテストだけがここを通る
+use_claude_agent() {
+  cp "$LOOP_REAL_DIR/agents/claude.sh" "$LOOP_DIR/agents/claude.sh"
+  chmod +x "$LOOP_DIR/agents/claude.sh"
+  # agents/claude.sh は設定の読み出し口を自分からの相対パス（../bin/loop-config）
+  # で解決し、その loop-config はさらに ../lib/config-cli.mjs を読む。fixture の
+  # LOOP_DIR には bin/ も lib/ も無いので、実物への symlink を張って実コードの
+  # まま動かす（設定自体は LOOP_DIR 経由で fixture 側が使われる）。
+  # lib も張るのは、node が ".." を先に字句解決してから開くため
+  # （$LOOP_DIR/bin/../lib = $LOOP_DIR/lib を探しに行く）
+  [ -e "$LOOP_DIR/bin" ] || ln -s "$LOOP_REAL_DIR/bin" "$LOOP_DIR/bin"
+  [ -e "$LOOP_DIR/lib" ] || ln -s "$LOOP_REAL_DIR/lib" "$LOOP_DIR/lib"
+  cp "$LOOP_REAL_DIR/prompts/"*.md "$LOOP_DIR/prompts/" 2>/dev/null || true
+  chmod +x "$BATS_TEST_DIRNAME/fixtures/bin/claude"
+  PATH="$BATS_TEST_DIRNAME/fixtures/bin:$PATH"; export PATH
+}
+
 # gh スタブを PATH の先頭に置き、呼び出しログを GH_LOG に貯める
 use_gh_stub() {
   chmod +x "$BATS_TEST_DIRNAME/fixtures/bin/gh"

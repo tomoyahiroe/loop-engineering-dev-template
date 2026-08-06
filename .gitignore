@@ -4,4 +4,5 @@ loops/.preview.meta
 loops/runs/*.log
 loops/.gate-failed-*
 loops/.merge-failed-*
+loops/.tools-misconfig
 .DS_Store

@@ -19,6 +19,10 @@ if [ "$MATURITY" = "L1" ]; then
   exit 1
 fi
 
+# Fixer も {{TEST_CMD}} / {{LINT_CMD}} を緑にすることが完了条件なので、
+# 実行できないなら起動しない（dispatch-maker / dispatch-verifier と同じ）
+require_project_tools_allowed || exit 1
+
 WT="$REPO_ROOT/../$(basename "$REPO_ROOT")-issue-$ISSUE"
 
 # worktree の有無はローカルな存在確認だけで完結する安価な処理なので、
