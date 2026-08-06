@@ -1,5 +1,15 @@
 # ループを常駐させる。docker compose up -d で起動し、以降ターミナルは不要。
 #
+# ★ 重要: 必ずリポジトリのルートディレクトリから起動してください。
+#   cd <リポジトリのルート>
+#   docker compose -f docker/compose.yml up -d
+# このファイル自体は docker/ の中にありますが、下の ${PWD} は「このファイルの
+# 場所」ではなく「docker compose を実行したシェルのカレントディレクトリ」に
+# 展開されます。docker/ の中から `cd docker && docker compose up -d` のように
+# 実行すると、マウント先・working_dir・REPO_ROOT がホストの実際のリポジトリ
+# パスとズレて起動に失敗します（entrypoint がエラーメッセージで検知はします
+# が、そもそも迷わないようここに明記します）。
+#
 # ${PWD}:${PWD} でホストと同じ絶対パスにマウントしているのは意図的です。
 # コンテナ内から docker compose を叩いたとき、ホストの Docker デーモンは
 # ホスト側のパスしか解決できないため、パスを一致させる必要があります（DooD）。
@@ -9,6 +19,12 @@
 # コンテナを起動・停止・削除でき、事実上ホストを操作できます。
 # これはローカル開発ツールとしての意図的な妥協です。信頼できないネットワーク
 # や共有ホストでは使わないでください。
+#
+# オプトアウト: 自分のアプリが Docker を一切使わない場合は、下の volumes に
+# ある次の2行（docker.sock のマウントと、直後のコメント1行）を削除すれば、
+# このコンテナはホストの Docker を一切操作できなくなります:
+#   - /var/run/docker.sock:/var/run/docker.sock
+#   # ↑ 上の「★ 注意」参照: ホストの root 相当の権限をコンテナに渡す。...
 services:
   loop:
     build:
@@ -18,7 +34,8 @@ services:
       - ${PWD}:${PWD}
       # ↑ DooD: ホストと同じ絶対パスでマウント（working_dir も同じ）
       - /var/run/docker.sock:/var/run/docker.sock
-      # ↑ 上の「★ 注意」参照: ホストの root 相当の権限をコンテナに渡す
+      # ↑ 上の「★ 注意」参照: ホストの root 相当の権限をコンテナに渡す。
+      #   不要なら上のコメントブロックの「オプトアウト」を参照してこの2行を削除する
       - loop-claude-auth:/root/.claude
       - loop-gh-auth:/root/.config/gh
     working_dir: ${PWD}
