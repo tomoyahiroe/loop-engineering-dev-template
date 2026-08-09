@@ -9,7 +9,9 @@ Maker → Verifier → 人間の merge が 1 日に複数回自動で回りま�
 ## 必要なもの
 
 - Docker（Docker Desktop など）
-- GitHub アカウントとこのリポジトリの push 権限
+- **Node.js 18 以上**（ホスト側。`.loop/bin/*` は node で動きます。
+  `/loop-setup` と `/loop-doctor`、毎朝の `/loop-mtg` がホストからこれを叩きます）
+- Git と、GitHub アカウント + このリポジトリの push 権限
 - Claude Code のサブスクリプション
 
 対象は **macOS / Linux** です。Windows は WSL2 の中で使ってください。
@@ -22,8 +24,14 @@ Maker → Verifier → 人間の merge が 1 日に複数回自動で回りま�
 /loop-setup
 ```
 
-これだけです。プロジェクトの検出、設定ファイルの生成、GitHub ラベルの作成、
+これだけです。`.loop` の依存インストール、プロジェクトの検出、設定ファイルの生成、
+リモート（`origin`）の確認、GitHub ラベルの作成、
 コンテナのビルドと起動、最後の健全性チェックまでを対話で進めます。
+
+クローンしたままだと `origin` はテンプレート側を指しています。
+`/loop-setup` はラベル作成の前に必ず確認を取りますが、
+**先に自分のリポジトリへ差し替えておくほうが確実です**
+（`gh repo create <name> --private --source=. --remote=origin --push`）。
 
 途中 1 回だけ、ブラウザでの認可が必要な手作業があります（`claude` と
 `gh` のログイン）。コマンドはスキルが提示するので、それを実行して戻ってください。
@@ -60,9 +68,10 @@ Maker → Verifier → 人間の merge が 1 日に複数回自動で回りま�
 
 ## 最初は L1 から
 
-`.loop/config.toml` の `maturity` は最初 `"L1"` にして、数回の firing で
-「ループが何をしようとしているか」を `loops/STATE.md` で観察してください。
-納得できたら `"L2"` に上げます。
+`.loop/config.toml` の `maturity` は**同梱の時点で `"L1"`** です。
+数回の firing で「ループが何をしようとしているか」を `loops/STATE.md` で
+観察してください。納得できたら自分で `"L2"` に上げます
+（`L1` の間、ループは判定と報告だけを行い、Maker を起動しません）。
 
 | | 動作 |
 |---|---|
