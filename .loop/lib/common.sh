@@ -213,13 +213,43 @@ $seg"
 }
 
 # コマンド名 $1 に対応する Bash 許可が $2（loop-config get の生出力、
-# 改行区切り）の中にあるか
+# 改行区切り）の中にあるか。
+#
+# 許可の中身の**先頭の語**が $1 と一致すれば「対応している」と判定する。
+# Bash(pnpm:*) や Bash(pnpm) だけでなく、Bash(pnpm test:*) のように
+# サブコマンドまで絞った狭い形も受け付ける（Claude Code の許可記法として
+# 正当で、このハーネス自身の defaults.toml も tools_verifier で
+# Bash(git log:*) / Bash(git diff:*) というこの形を使っている）。
+#
+# なぜ広げたか: 以前は Bash(cmd:*) / Bash(cmd) の 2 形だけを見ていたため、
+# test = "pnpm test" + extra_tools = ["Bash(pnpm test:*)"] という
+# **より狭い＝より安全な**設定が「許可が無い」と判定され、実行時ガードが
+# 3 つの dispatcher すべての起動を拒否していた。agents/claude.sh はこの
+# 許可をそのまま claude に渡すので実際には動く設定であり、しかも直し方の
+# 案内は「extra_tools を広げろ」— 狭い権限を書いた人間を罰して、権限を
+# 広げさせる方向に効いていた。
+#
+# 残る不正確さ（意図的に受け入れている）: 判定材料はコマンド名だけなので、
+# Bash(pnpm test:*) は「pnpm を使う test/lint」全体を覆っていると見なす。
+# 例えば lint = "pnpm run lint" に対して Bash(pnpm test:*) しか無い場合、
+# ここは OK と答えるが実行時には拒否され得る。引数まで突き合わせるには
+# extract_command_names がコマンド名ではなくコマンド全文を返す必要があり、
+# それは別の作り直しになる。誤って通す側に倒すのは、この関数の答えが
+# 「dispatch を止めるかどうか」に直結し、誤って止めると正しい設定の
+# ループが動かなくなるため（extra_tools が空という本命の失敗は
+# ambiguous/missing 経路で今までどおり捕まる）
 extra_tools_covers_cmd() {
-  local cmd="$1" tools="$2" line
+  local cmd="$1" tools="$2" line inner first
   while IFS= read -r line; do
     case "$line" in
-      "Bash($cmd:"*|"Bash($cmd)") return 0 ;;
+      "Bash("*")") : ;;
+      *) continue ;;
     esac
+    inner="${line#Bash(}"
+    inner="${inner%)}"
+    inner="${inner%:\*}"   # 末尾のワイルドカード（:*）を落とす
+    first="${inner%% *}"   # 先頭の語
+    [ "$first" = "$cmd" ] && return 0
   done <<< "$tools"
   return 1
 }
@@ -227,7 +257,10 @@ extra_tools_covers_cmd() {
 # project.test / project.lint を実行できるツール許可が揃っているかを判定する。
 # $1 = project.test（空文字可）, $2 = project.lint（空文字可）,
 # $3 = extra_tools（loop-config get の生出力、改行区切り。空でもよい）
+# $4 = agent.provider（省略時は "claude" 扱い）
 # 標準出力に判定結果を 1 行:
+#   not-applicable                provider が claude ではない。許可リストの
+#                                  意味論は provider 固有なので判定できない
 #   unneeded                      test も lint も未設定で、そもそも確認が要らない
 #   ok [<確認できたコマンド...>]   test/lint はあるが、必要なコマンドは組み込み
 #                                  read-only か extra_tools で全部揃っている。
@@ -242,8 +275,19 @@ extra_tools_covers_cmd() {
 # 「確認できたコマンドが 0 件の ok」と「そもそも未設定」を呼び出し側が
 # 区別できるようにするため
 project_tools_check() {
-  local test_cmd="$1" lint_cmd="$2" tools="$3"
+  local test_cmd="$1" lint_cmd="$2" tools="$3" provider="${4:-claude}"
   local confident names all_names missing found cmd n_tools
+
+  # provider による適用外判定もこの関数の中に置く。ここが呼び出し側に
+  # 散っていると、片方（実行時ガード）だけが provider を見て早期 return し、
+  # もう片方（doctor）は見ないまま判定して「doctor は NG と言うのに実行時は
+  # 通る」という食い違いが起きる（実際に provider = "mock" で起きていた）。
+  # 判定を 1 箇所に集約するというこの関数の存在理由そのものなので、
+  # 呼び出し側は provider を渡すだけにする
+  if [ "$provider" != "claude" ]; then
+    echo not-applicable
+    return 0
+  fi
 
   if [ -z "$test_cmd" ] && [ -z "$lint_cmd" ]; then
     echo unneeded
@@ -309,10 +353,12 @@ $names"
 # 書かれていれば「人間が意図して設定した」とみなして通す。
 require_project_tools_allowed() {
   local provider extra test_cmd lint_cmd marker result n missing extra_label
-  provider="$(cfg agent.provider 2>/dev/null || echo '')"
   # 許可リストの意味論は provider 固有（agents/claude.sh のコメント参照）。
-  # extra_tools を読まない provider（テスト用の mock 等）には適用しない
-  [ "$provider" = "claude" ] || return 0
+  # extra_tools を読まない provider（テスト用の mock 等）には適用しない。
+  # その判定自体は project_tools_check に持たせてある（doctor と食い違わない
+  # ようにするため。ここで早期 return すると doctor 側だけが判定を持たない
+  # 状態に戻る）ので、ここは値を渡すだけ
+  provider="$(cfg agent.provider 2>/dev/null || echo '')"
 
   marker="$REPO_ROOT/loops/.tools-misconfig"
   extra="$(cfg agents.claude.extra_tools 2>/dev/null || echo '')"
@@ -321,11 +367,12 @@ require_project_tools_allowed() {
 
   # 判定は project_tools_check（上）に一本化してある。loop-doctor も同じ
   # 関数を呼ぶので、ここと doctor が違う答えを返すことは構造的に起こらない
-  result="$(project_tools_check "$test_cmd" "$lint_cmd" "$extra")"
+  result="$(project_tools_check "$test_cmd" "$lint_cmd" "$extra" "$provider")"
   missing=""
   case "$result" in
-    unneeded|ok|"ok "*)
-      # 設定が直った（または test/lint を持たないプロジェクト、または必要な
+    not-applicable|unneeded|ok|"ok "*)
+      # 設定が直った（または provider が claude ではない、test/lint を持たない
+      # プロジェクト、必要な
       # コマンドが組み込み read-only だけで揃っている）。次に壊れたときまた
       # 1 回だけ報告できるよう、マーカーを片付けてから通す
       rm -f "$marker" 2>/dev/null || true

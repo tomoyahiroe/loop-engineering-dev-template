@@ -116,6 +116,27 @@ allow_extra_tools() {
   [ ! -f "$REPO_ROOT/loops/runs/$(date +%Y-%m-%d)-fixer-pr-30-r1.md" ]
 }
 
+@test "サブコマンドまで絞った狭い許可（Bash(pnpm test:*)）では 3 つの dispatcher とも止まらない" {
+  # コードレビュー指摘: 許可の形を Bash(cmd:*) / Bash(cmd) の 2 つしか
+  # 認めていなかったため、**より狭い＝より安全な**書き方をした人だけが
+  # 全 dispatcher の起動を拒否されていた。しかも案内は「extra_tools を足せ」で、
+  # 権限を広げる方向に効く。この形は defaults.toml の tools_verifier 自身が
+  # 使っている（Bash(git log:*)）ので、ハーネスの推奨と真っ向から矛盾していた
+  printf '[agent]\nprovider = "claude"\n\n[project]\ntest = "pnpm test"\nlint = ""\n\n[agents.claude]\nextra_tools = ["Bash(pnpm test:*)"]\n' \
+    > "$LOOP_DIR/config.toml"
+
+  run "$LOOP_REAL_DIR/bin/dispatch-maker" 7
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"REFUSED"* ]]
+
+  run "$LOOP_REAL_DIR/bin/dispatch-verifier" 21
+  [[ "$output" != *"REFUSED"* ]]
+
+  git -C "$REPO_ROOT" worktree add -q "$TMP/repo-issue-9" -b loop/issue-9 main
+  run "$LOOP_REAL_DIR/bin/dispatch-fixer" 30 9 1
+  [[ "$output" != *"REFUSED"* ]]
+}
+
 @test "許可リストを見ない provider（mock）はこのガードの対象外" {
   # ツール許可リストの意味論は provider 固有。mock provider は
   # extra_tools を読まないので、同じ設定でも拒否されない
