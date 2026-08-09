@@ -291,3 +291,67 @@ teardown() { cleanup_test_repo; rm -rf "$TMP"; }
   [[ "$output" == *"NG   project/tools 対応"* ]]
   [[ "$output" == *"cd"* ]]
 }
+
+# --- Fix round 3 で追加した回帰テスト ---------------------------------------
+# コードレビュー指摘: round 2 で cd と一部の git サブコマンドを組み込み扱い
+# にしたが、同じ失敗クラスの取りこぼしが 2 件残っていた。
+# (1) 先頭の環境変数代入（CI=true npm test）をコマンド名として誤抽出し、
+#     正しい設定を弾いていた（cd のときと同じ「正しい設定を止める」方向）。
+# (2) GIT_READONLY_SUBCMDS に symbolic-ref が入っており、実際には
+#     `git symbolic-ref HEAD refs/heads/x` で HEAD を書き換えられる
+#     （「壊れた設定を健全と報告する」偽陰性の方向。この検査が防ぐべき失敗）
+
+@test "先頭の環境変数代入（CI=true npm test）はコマンド名ではなく npm を見る" {
+  printf '[agent]\nprovider = "claude"\n\n[project]\ntest = "CI=true npm test"\nlint = ""\n\n[agents.claude]\nextra_tools = ["Bash(npm:*)"]\n' \
+    > "$LOOP_DIR/config.toml"
+
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"NG"* ]]
+
+  use_claude_agent
+  run "$LOOP_REAL_DIR/bin/dispatch-maker" 4
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"REFUSED"* ]]
+}
+
+@test "複数連続する環境変数代入（A=1 B=2 pnpm test）も読み飛ばして pnpm を見る" {
+  printf '[project]\ntest = "A=1 B=2 pnpm test"\nlint = ""\n\n[agents.claude]\nextra_tools = ["Bash(pnpm:*)"]\n' \
+    > "$LOOP_DIR/config.toml"
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"NG"* ]]
+}
+
+@test "環境変数代入があっても本物の不一致（CI=true npm test + Bash(make:*)）は今も NG になる" {
+  printf '[project]\ntest = "CI=true npm test"\nlint = ""\n\n[agents.claude]\nextra_tools = ["Bash(make:*)"]\n' \
+    > "$LOOP_DIR/config.toml"
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"NG   project/tools 対応"* ]]
+  [[ "$output" == *"npm"* ]]
+}
+
+@test "git symbolic-ref は書き込み可能なため read-only の組み込み扱いにしない" {
+  printf '[project]\ntest = "git symbolic-ref HEAD refs/heads/hijacked && npm test"\nlint = ""\n\n[agents.claude]\nextra_tools = ["Bash(npm:*)"]\n' \
+    > "$LOOP_DIR/config.toml"
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"NG   project/tools 対応"* ]]
+  [[ "$output" == *"git"* ]]
+}
+
+@test "round 2 までの修正は退行していない（cd+npm は OK、pnpm+make は NG）" {
+  printf '[project]\ntest = "cd web && npm test"\nlint = ""\n\n[agents.claude]\nextra_tools = ["Bash(npm:*)"]\n' \
+    > "$LOOP_DIR/config.toml"
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"NG"* ]]
+
+  printf '[project]\ntest = "pnpm -r test"\nlint = ""\n\n[agents.claude]\nextra_tools = ["Bash(make:*)"]\n' \
+    > "$LOOP_DIR/config.toml"
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"NG   project/tools 対応"* ]]
+  [[ "$output" == *"pnpm"* ]]
+}

@@ -63,8 +63,12 @@ BUILTIN_READONLY_CMDS="ls cat echo pwd head tail grep find wc which diff stat du
 # 疑いようのない読み取り専用サブコマンドだけの保守的な部分集合を使う。
 # branch / tag / remote / config / checkout はフラグ次第で書き込みになり
 # 得るため、意図的にこの一覧へ含めない（`tr` のときと同じ理由で、確信が
-# 持てないものは「組み込み」に分類しない）
-GIT_READONLY_SUBCMDS="status log diff show blame describe rev-parse ls-files ls-tree cat-file shortlog rev-list merge-base name-rev symbolic-ref"
+# 持てないものは「組み込み」に分類しない）。symbolic-ref も同じ理由で
+# 除外する: `git symbolic-ref HEAD refs/heads/x` は引数次第で HEAD を
+# 書き換える（実測で確認済み）。判断がつかないサブコマンドは含めない方を
+# 選ぶ — 含め損ねると正しい設定が弾かれるだけだが、誤って含めると壊れた
+# 設定を健全と報告してしまい、この検査が防ぐはずの偽陰性そのものになる
+GIT_READONLY_SUBCMDS="status log diff show blame describe rev-parse ls-files ls-tree cat-file shortlog rev-list merge-base name-rev"
 
 # $1 が、空白区切りの一覧 $2 に単語として含まれるか
 is_word_in_list() {
@@ -76,9 +80,10 @@ is_word_in_list() {
 
 # project.test / project.lint のようなシェルコマンド文字列から、extra_tools
 # の許可が必要なコマンド名を抜き出す（先頭トークン、および && ; | の後ろの
-# 先頭トークン）。ただし Claude Code の組み込み read-only コマンド（上の
-# BUILTIN_READONLY_CMDS / GIT_READONLY_SUBCMDS）は許可が要らないので、
-# ここで除外して出力しない。
+# 先頭トークン。ただし CI=true npm test のような先頭の環境変数代入
+# （VAR=val、複数連続も可）は読み飛ばし、その後ろの実コマンドを見る）。
+# Claude Code の組み込み read-only コマンド（上の BUILTIN_READONLY_CMDS /
+# GIT_READONLY_SUBCMDS）は許可が要らないので、ここで除外して出力しない。
 # クォートは shell の入れ子規則どおりに読み飛ばす（例: echo 'a && b' の
 # 中の && は区切りとして扱わない）。ただしコマンド置換・リダイレクト・
 # `||`・バックスラッシュ・`sh -c "..."` のように実際に実行されるコマンドが
@@ -135,6 +140,21 @@ $seg"
     [ -z "$seg" ] && continue
     read -r cmd rest <<< "$seg"
     [ -z "$cmd" ] && continue
+
+    # 先頭の環境変数代入（VAR=val）を読み飛ばす。CI=true npm test のような
+    # 形は CI では最も普通の書き方で、代入をコマンド名扱いすると npm では
+    # なく "CI=true" の許可を要求してしまう。複数連続（A=1 B=2 npm test）
+    # にも対応する
+    while :; do
+      case "$cmd" in
+        [A-Za-z_]*=*) : ;;
+        *) break ;;
+      esac
+      read -r cmd rest <<< "$rest"
+      [ -z "$cmd" ] && break
+    done
+    [ -z "$cmd" ] && continue
+
     case "$cmd" in
       # 実際に実行されるコマンドが引数の中に隠れる形は解析を諦める
       sh|bash|zsh|dash|env|xargs|eval|nohup|time|sudo|command)
