@@ -42,8 +42,43 @@ retry_delay() {
 # 言うのに実行時は拒否される」ような食い違い（P1 で何度も踏んだ「部品同士が
 # 黙って矛盾する」パターン）が起こらないようにする。
 
-# project.test / project.lint のようなシェルコマンド文字列から、実行される
-# コマンド名を抜き出す（先頭トークン、および && ; | の後ろの先頭トークン）。
+# Claude Code の組み込み read-only allowlist。extra_tools に書かなくても
+# 常に実行できるコマンドなので、不足判定の対象から除外する。
+#
+# 出典: https://code.claude.com/docs/en/permissions.md 「Read-only commands」
+# 原文: "Claude Code recognizes a built-in set of Bash commands as read-only
+#   and runs them without a permission prompt in every mode. These include
+#   ls, cat, echo, pwd, head, tail, grep, find, wc, which, diff, stat, du,
+#   cd, and read-only forms of git. The set is not configurable"
+#
+# この一覧は 2026-08-10 に上記ドキュメントを直接取得して確認したもの。
+# P1 で `tr` を「組み込みだと思ったら違っていた」で個別に extra_tools へ
+# 足す羽目になった教訓があるため、ここは常に一次情報（公式ドキュメント）を
+# 確認してから書く。確信が持てないコマンドは足さない（除外し過ぎて NG を
+# 誤って出す方が、含め過ぎて壊れた設定を OK と報告するより安全）
+BUILTIN_READONLY_CMDS="ls cat echo pwd head tail grep find wc which diff stat du"
+
+# git は「read-only な形」だけが組み込み扱いで、サブコマンド次第。公式
+# ドキュメントはサブコマンドの厳密な一覧までは挙げていないため、ここでは
+# 疑いようのない読み取り専用サブコマンドだけの保守的な部分集合を使う。
+# branch / tag / remote / config / checkout はフラグ次第で書き込みになり
+# 得るため、意図的にこの一覧へ含めない（`tr` のときと同じ理由で、確信が
+# 持てないものは「組み込み」に分類しない）
+GIT_READONLY_SUBCMDS="status log diff show blame describe rev-parse ls-files ls-tree cat-file shortlog rev-list merge-base name-rev symbolic-ref"
+
+# $1 が、空白区切りの一覧 $2 に単語として含まれるか
+is_word_in_list() {
+  case " $2 " in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
+# project.test / project.lint のようなシェルコマンド文字列から、extra_tools
+# の許可が必要なコマンド名を抜き出す（先頭トークン、および && ; | の後ろの
+# 先頭トークン）。ただし Claude Code の組み込み read-only コマンド（上の
+# BUILTIN_READONLY_CMDS / GIT_READONLY_SUBCMDS）は許可が要らないので、
+# ここで除外して出力しない。
 # クォートは shell の入れ子規則どおりに読み飛ばす（例: echo 'a && b' の
 # 中の && は区切りとして扱わない）。ただしコマンド置換・リダイレクト・
 # `||`・バックスラッシュ・`sh -c "..."` のように実際に実行されるコマンドが
@@ -53,7 +88,7 @@ retry_delay() {
 # ほうが安全側）
 extract_command_names() {
   local raw="$1"
-  local i len ch in_squote in_dquote seg segs cmd
+  local i len ch in_squote in_dquote seg segs cmd rest sub cd_target
 
   case "$raw" in
     *'$('*|*'`'*|*'<'*|*'>'*|*'||'*|*'|&'*|*'\'*)
@@ -98,7 +133,7 @@ $seg"
 
   while IFS= read -r seg; do
     [ -z "$seg" ] && continue
-    read -r cmd _ <<< "$seg"
+    read -r cmd rest <<< "$seg"
     [ -z "$cmd" ] && continue
     case "$cmd" in
       # 実際に実行されるコマンドが引数の中に隠れる形は解析を諦める
@@ -106,6 +141,28 @@ $seg"
         return 1
         ;;
     esac
+
+    if is_word_in_list "$cmd" "$BUILTIN_READONLY_CMDS"; then
+      continue  # 組み込み read-only。許可が要らないので判定対象にしない
+    fi
+
+    if [ "$cmd" = "cd" ]; then
+      # cd はワーキングディレクトリの内側への移動だけが read-only 扱い
+      # （ドキュメント: "A cd into a path inside your working directory ...
+      #  is also read-only"）。絶対パスはその外に出られるため対象外のまま
+      # 判定に回す（安全側）。相対パスは組み込みとして扱う
+      read -r cd_target _ <<< "$rest"
+      case "$cd_target" in
+        /*) : ;;
+        *) continue ;;
+      esac
+    elif [ "$cmd" = "git" ]; then
+      read -r sub _ <<< "$rest"
+      if is_word_in_list "$sub" "$GIT_READONLY_SUBCMDS"; then
+        continue  # 読み取り専用サブコマンドの組み込み扱い
+      fi
+    fi
+
     printf '%s\n' "$cmd"
   done <<< "$segs"
   return 0
@@ -127,16 +184,25 @@ extra_tools_covers_cmd() {
 # $1 = project.test（空文字可）, $2 = project.lint（空文字可）,
 # $3 = extra_tools（loop-config get の生出力、改行区切り。空でもよい）
 # 標準出力に判定結果を 1 行:
-#   ok [<確認できたコマンド...>]  未設定で不要、またはコマンドが全部揃っている
+#   unneeded                      test も lint も未設定で、そもそも確認が要らない
+#   ok [<確認できたコマンド...>]   test/lint はあるが、必要なコマンドは組み込み
+#                                  read-only か extra_tools で全部揃っている。
+#                                  末尾のコマンド一覧は空のこともある
+#                                  （中身が全部組み込みコマンドだった場合）
 #   ambiguous <N>                 解析に自信が持てない。N=extra_tools の件数
 #                                  （中身を見ない件数チェックへのフォールバック）
 #   missing <コマンド...>         解析はできたが、許可が足りないコマンドがある
+#
+# "unneeded" と "ok"（コマンド一覧が空のことがある）を別の語にしてあるのは、
+# test/lint が組み込みコマンドだけで構成される場合（例: echo skip）に
+# 「確認できたコマンドが 0 件の ok」と「そもそも未設定」を呼び出し側が
+# 区別できるようにするため
 project_tools_check() {
   local test_cmd="$1" lint_cmd="$2" tools="$3"
   local confident names all_names missing found cmd n_tools
 
   if [ -z "$test_cmd" ] && [ -z "$lint_cmd" ]; then
-    echo ok
+    echo unneeded
     return 0
   fi
 
@@ -214,9 +280,10 @@ require_project_tools_allowed() {
   result="$(project_tools_check "$test_cmd" "$lint_cmd" "$extra")"
   missing=""
   case "$result" in
-    ok|"ok "*)
-      # 設定が直った（または test/lint を持たないプロジェクト）。次に壊れたとき
-      # また 1 回だけ報告できるよう、マーカーを片付けてから通す
+    unneeded|ok|"ok "*)
+      # 設定が直った（または test/lint を持たないプロジェクト、または必要な
+      # コマンドが組み込み read-only だけで揃っている）。次に壊れたときまた
+      # 1 回だけ報告できるよう、マーカーを片付けてから通す
       rm -f "$marker" 2>/dev/null || true
       return 0
       ;;

@@ -144,15 +144,16 @@ teardown() { cleanup_test_repo; rm -rf "$TMP"; }
   [[ "$output" == *"pnpm"* ]]
 }
 
-@test "複合コマンド（cd ... && npm test）でも中身のコマンド名を拾って判定する" {
-  printf '[project]\ntest = "cd packages/web && npm test"\nlint = ""\n\n[agents.claude]\nextra_tools = ["Bash(npm:*)"]\n' \
+@test "複合コマンド（cd ... && pnpm test）でも中身の非組み込みコマンド名を拾って判定する" {
+  # cd 自体は組み込み read-only（相対パス）なので許可が要らない。ここで
+  # 不足として拾われるべきなのは pnpm の方
+  printf '[project]\ntest = "cd packages/web && pnpm test"\nlint = ""\n\n[agents.claude]\nextra_tools = ["Bash(make:*)"]\n' \
     > "$LOOP_DIR/config.toml"
   run "$LOOP_REAL_DIR/bin/loop-doctor"
-  # npm は許可されているが cd は許可されていないため、複合コマンドの
-  # 先頭トークンまで拾えているなら cd が不足として NG になるはず
   [ "$status" -eq 1 ]
   [[ "$output" == *"NG   project/tools 対応"* ]]
-  [[ "$output" == *"cd"* ]]
+  [[ "$output" == *"pnpm"* ]]
+  [[ "$output" != *"（cd）"* ]]
 }
 
 @test "extra_tools の中身が test/lint のコマンドをちゃんと covers していれば OK（誤検知しない）" {
@@ -214,4 +215,79 @@ teardown() { cleanup_test_repo; rm -rf "$TMP"; }
   [[ "$output" != *"NG   worktree 残骸"* ]]
 
   rm -rf "$OUTER"
+}
+
+# --- Fix round 2 で追加した回帰テスト ---------------------------------------
+# コードレビュー指摘: round 1 の修正が過剰に振れ、Claude Code の組み込み
+# read-only コマンド（ls/cat/echo/pwd/head/tail/grep/find/wc/which/diff/
+# stat/du/cd と read-only な git。出典: code.claude.com/docs/en/permissions.md
+# "Read-only commands"）まで extra_tools への許可が必要と誤判定していた。
+# `cd packages/web && pnpm test` はこのハーネス自身が Issue テンプレート /
+# loop-gate で推奨している「実行ディレクトリ込みのコマンド」の形そのものであり、
+# monorepo では最も普通の書き方なので、これを NG にすると正しい設定でループが
+# 起動しなくなる（元のバグより有害）
+
+@test "cd + npm（組み込み cd と許可済み npm）は doctor でも実行時ガードでも OK" {
+  printf '[agent]\nprovider = "claude"\n\n[project]\ntest = "cd web && npm test"\nlint = ""\n\n[agents.claude]\nextra_tools = ["Bash(npm:*)"]\n' \
+    > "$LOOP_DIR/config.toml"
+
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"NG"* ]]
+
+  use_claude_agent
+  run "$LOOP_REAL_DIR/bin/dispatch-maker" 2
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"REFUSED"* ]]
+}
+
+@test "cd + pnpm（許可が make のみ）は本物の不一致として今も NG になる" {
+  printf '[agent]\nprovider = "claude"\n\n[project]\ntest = "cd web && pnpm test"\nlint = ""\n\n[agents.claude]\nextra_tools = ["Bash(make:*)"]\n' \
+    > "$LOOP_DIR/config.toml"
+
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"NG   project/tools 対応"* ]]
+  [[ "$output" == *"pnpm"* ]]
+
+  use_claude_agent
+  run "$LOOP_REAL_DIR/bin/dispatch-maker" 3
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"REFUSED"* ]]
+  [[ "$output" == *"pnpm"* ]]
+}
+
+@test "組み込みコマンドだけで構成された test（echo skip）は extra_tools が空でも OK" {
+  printf '[project]\ntest = "echo skip"\nlint = ""\n\n[agents.claude]\nextra_tools = []\n' \
+    > "$LOOP_DIR/config.toml"
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"NG"* ]]
+  [[ "$output" == *"OK   project/tools 対応"* ]]
+}
+
+@test "read-only な git サブコマンド（git status）は組み込み扱いで許可が要らない" {
+  printf '[project]\ntest = "git status && npm test"\nlint = ""\n\n[agents.claude]\nextra_tools = ["Bash(npm:*)"]\n' \
+    > "$LOOP_DIR/config.toml"
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"NG"* ]]
+}
+
+@test "書き込みになり得る git サブコマンド（git branch）は保守的に許可が必要なまま" {
+  printf '[project]\ntest = "git branch -d tmp && npm test"\nlint = ""\n\n[agents.claude]\nextra_tools = ["Bash(npm:*)"]\n' \
+    > "$LOOP_DIR/config.toml"
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"NG   project/tools 対応"* ]]
+  [[ "$output" == *"git"* ]]
+}
+
+@test "絶対パスへの cd はワーキングディレクトリの外に出られるため組み込み扱いしない" {
+  printf '[project]\ntest = "cd /tmp && npm test"\nlint = ""\n\n[agents.claude]\nextra_tools = ["Bash(npm:*)"]\n' \
+    > "$LOOP_DIR/config.toml"
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"NG   project/tools 対応"* ]]
+  [[ "$output" == *"cd"* ]]
 }

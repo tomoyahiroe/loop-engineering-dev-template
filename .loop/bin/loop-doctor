@@ -39,11 +39,14 @@ P_LINT="$(cfg project.lint || echo '')"
 EXTRA_RAW="$("$BIN_DIR/loop-config" get agents.claude.extra_tools 2>/dev/null || echo '')"
 PT_RESULT="$(project_tools_check "$P_TEST" "$P_LINT" "$EXTRA_RAW")"
 case "$PT_RESULT" in
+  unneeded)
+    emit OK "project/tools 対応" "test も lint も未設定（ループはテストを実行しない）"
+    ;;
   ok|"ok "*)
     PT_FOUND="${PT_RESULT#ok}"
     PT_FOUND="${PT_FOUND# }"
     if [ -z "$PT_FOUND" ]; then
-      emit OK "project/tools 対応" "test も lint も未設定（ループはテストを実行しない）"
+      emit OK "project/tools 対応" "test/lint が使うコマンドは Claude Code の組み込み read-only だけ（追加の許可は不要）"
     else
       emit OK "project/tools 対応" "test/lint が使うコマンド（${PT_FOUND}）に対応する Bash 許可がある"
     fi
