@@ -6,6 +6,13 @@ setup() {
   TMP="$(mktemp -d)"
   make_test_repo "$TMP"
   use_gh_stub
+  # ccusage は必ずスタブする。このファイルには doctor の判定と実行時ガードの
+  # 一致を確かめるために dispatch-maker を起動するテストがあり、スタブが無いと
+  # budget-check が本物の `npx ccusage@latest` を叩いて**開発者のその日の実際の
+  # トークン使用量**で合否が変わる（実際に、使用量が budget.daily_tokens の
+  # 既定 120M を超えた時点で 3 本が落ちた）。ここで見たいのは予算ゲートでは
+  # ないので、環境に依存しない値に固定する
+  use_ccusage_stub ok
   chmod +x "$BATS_TEST_DIRNAME/fixtures/bin/docker"
   DOCKER_LOG="$TEST_TMP/docker.log"; export DOCKER_LOG
   # 既定は「全部健全」
@@ -623,7 +630,6 @@ EOF
   # コードレビュー指摘: 実行時ガードは provider != claude で早期 return して
   # 通すのに、doctor 側にはその判定が無く NG と言っていた（doctor が NG・
   # 実行時は OK という、以前に塞いだのとは逆向きの食い違い）
-  use_ccusage_stub ok
   use_mock_agent   # provider = "mock" / test = pnpm / extra_tools は空
 
   run "$LOOP_REAL_DIR/bin/loop-doctor"
@@ -640,7 +646,6 @@ EOF
   # サブコマンドまで絞った**より狭い＝より安全な**形
   # （defaults.toml の tools_verifier 自身が使っている Bash(git log:*) の形）を
   # 「許可が無い」と判定して、3 つの dispatcher すべての起動を拒否していた
-  use_ccusage_stub ok
   printf '[agent]\nprovider = "claude"\n\n[project]\ntest = "pnpm test"\nlint = ""\n\n[agents.claude]\nextra_tools = ["Bash(pnpm test:*)"]\n' \
     > "$LOOP_DIR/config.toml"
 
