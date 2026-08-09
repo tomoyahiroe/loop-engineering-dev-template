@@ -63,8 +63,14 @@ case "$PT_RESULT" in
     ;;
   "missing "*)
     PT_MISSING="${PT_RESULT#missing }"
+    # 「extra_tools に足せ」で言い切らない。この検査の視野は extra_tools だけで
+    # tools_<role> を見ておらず、extra_tools は全ロールに効くため、言い切ると
+    # tools_verifier の狭い許可（Bash(git log:*) 等）で足りていた場面でも
+    # Verifier にフルの権限を配らせてしまう。人間が読むのはこの行なので、
+    # 誤警報の可能性と副作用をここに書く（1 行に収めるのは「各行は
+    # OK/NG/SKIP で始まる」という出力形式の契約を守るため）
     emit NG "project/tools 対応" \
-      "test/lint が使うコマンド（${PT_MISSING}）に対応する Bash 許可が extra_tools に無い。Verifier がテストを実行できない"
+      "test/lint が使うコマンド（${PT_MISSING}）に対応する Bash 許可が extra_tools に無い。Verifier がテストを実行できない。※この検査は extra_tools だけを見る（.loop/defaults.toml の tools_maker / tools_verifier / tools_fixer は見ない）ので、そこで既に許可されていればこの NG は誤警報。extra_tools への追加は全ロールに効くため、狭い許可で足りるなら広げないこと"
     ;;
 esac
 

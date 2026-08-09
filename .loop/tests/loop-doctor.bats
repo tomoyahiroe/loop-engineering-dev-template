@@ -266,19 +266,12 @@ teardown() { cleanup_test_repo; rm -rf "$TMP"; }
   [[ "$output" == *"OK   project/tools 対応"* ]]
 }
 
-@test "git は（サブコマンドを問わず）許可が必要。round 4 で組み込み扱いを撤去した" {
-  # round 2 ではこの設定を「git status は read-only な組み込みだから OK」と
-  # していた。round 4 で git の特別扱いを撤去したため NG になる（詳しい理由は
-  # common.sh の GIT_READONLY_SUBCMDS 撤去コメント、および下の round 4 節）
-  printf '[project]\ntest = "git status && npm test"\nlint = ""\n\n[agents.claude]\nextra_tools = ["Bash(npm:*)"]\n' \
-    > "$LOOP_DIR/config.toml"
-  run "$LOOP_REAL_DIR/bin/loop-doctor"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"NG   project/tools 対応"* ]]
-  [[ "$output" == *"git"* ]]
-}
+# round 2 にはここに「read-only な git サブコマンド（git status）は組み込み扱いで
+# 許可が要らない」というテストがあった。round 4 で git の特別扱いを撤去したため
+# 期待値が反転し、round 5 で削除した（同じ設定を、実行時ガードまで見る上位互換の
+# テスト「git を使う test は Bash(git:*) が無ければ NG」が下の round 4 節にある）。
 
-@test "書き込みになり得る git サブコマンド（git branch）は保守的に許可が必要なまま" {
+@test "git branch も許可が必要（git はサブコマンドを問わず判定対象）" {
   printf '[project]\ntest = "git branch -d tmp && npm test"\nlint = ""\n\n[agents.claude]\nextra_tools = ["Bash(npm:*)"]\n' \
     > "$LOOP_DIR/config.toml"
   run "$LOOP_REAL_DIR/bin/loop-doctor"
@@ -301,9 +294,12 @@ teardown() { cleanup_test_repo; rm -rf "$TMP"; }
 # にしたが、同じ失敗クラスの取りこぼしが 2 件残っていた。
 # (1) 先頭の環境変数代入（CI=true npm test）をコマンド名として誤抽出し、
 #     正しい設定を弾いていた（cd のときと同じ「正しい設定を止める」方向）。
-# (2) GIT_READONLY_SUBCMDS に symbolic-ref が入っており、実際には
-#     `git symbolic-ref HEAD refs/heads/x` で HEAD を書き換えられる
-#     （「壊れた設定を健全と報告する」偽陰性の方向。この検査が防ぐべき失敗）
+# (2) 当時あった「read-only な git サブコマンドの一覧」に symbolic-ref が
+#     入っており、実際には `git symbolic-ref HEAD refs/heads/x` で HEAD を
+#     書き換えられた（「壊れた設定を健全と報告する」偽陰性の方向）。
+#     round 4 でその一覧ごと撤去し、git はサブコマンドを問わず判定対象に
+#     なったので、(2) のテストは今も通るが理由が変わっている（「一覧から
+#     外したから」ではなく「git 全体が対象だから」）
 
 @test "先頭の環境変数代入（CI=true npm test）はコマンド名ではなく npm を見る" {
   printf '[agent]\nprovider = "claude"\n\n[project]\ntest = "CI=true npm test"\nlint = ""\n\n[agents.claude]\nextra_tools = ["Bash(npm:*)"]\n' \
@@ -336,7 +332,7 @@ teardown() { cleanup_test_repo; rm -rf "$TMP"; }
   [[ "$output" == *"npm"* ]]
 }
 
-@test "git symbolic-ref は書き込み可能なため read-only の組み込み扱いにしない" {
+@test "git symbolic-ref も許可が必要（round 3 の偽陰性の回帰。今は git 一律の判定で通る）" {
   printf '[project]\ntest = "git symbolic-ref HEAD refs/heads/hijacked && npm test"\nlint = ""\n\n[agents.claude]\nextra_tools = ["Bash(npm:*)"]\n' \
     > "$LOOP_DIR/config.toml"
   run "$LOOP_REAL_DIR/bin/loop-doctor"
@@ -361,7 +357,8 @@ teardown() { cleanup_test_repo; rm -rf "$TMP"; }
 }
 
 # --- Fix round 4 で追加した回帰テスト ---------------------------------------
-# GIT_READONLY_SUBCMDS（「read-only な git サブコマンド」の手組み一覧）を
+# GIT_READONLY_SUBCMDS（「read-only な git サブコマンド」の手組み一覧。
+# この定数はもう存在しない。名前が出てくるのはこの履歴の記述だけ）を
 # 撤去し、git を pnpm や make と全く同じに扱うようにした。round 3 で
 # symbolic-ref を外した直後、残っていた 14 件のうち 6 件（log/diff/show/
 # blame/shortlog/rev-list）が --output=<path> でリポジトリ外のファイルを

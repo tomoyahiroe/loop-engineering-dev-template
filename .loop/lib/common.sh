@@ -351,10 +351,23 @@ require_project_tools_allowed() {
   if [ -n "$missing" ]; then
     echo "  次のコマンドに対応する Bash 許可が extra_tools に見当たりません: $missing"
   fi
-  echo "  .loop/config.toml の [agents.claude] extra_tools に、そのコマンドを"
-  echo "  実行できる Bash 許可を追加してください。"
-  echo "  例: extra_tools = [\"Bash(pnpm:*)\", \"Bash(npx:*)\", \"Bash(node:*)\"]"
-  echo "  test/lint を持たないプロジェクトなら [project] の test / lint を \"\" にしてください。"
+  # この検査の視野は extra_tools だけ。tools_maker / tools_verifier /
+  # tools_fixer は見ていないため、そこで既に許可されているコマンドでも
+  # 「不足」と言ってしまう。ここで無条件に「extra_tools に足せ」と勧めると、
+  # extra_tools は全ロールに効くので、狭い許可（例: tools_verifier の
+  # Bash(git log:*) / Bash(git diff:*)）で足りていたはずの Verifier に
+  # フルの権限を配らせることになる。許可リストを守るための検査が
+  # 許可リストを広げさせないよう、選択肢と副作用を並べて人間に選ばせる
+  echo "  この検査が見ているのは [agents.claude] extra_tools だけで、"
+  echo "  tools_maker / tools_verifier / tools_fixer（.loop/defaults.toml）は見ていません。"
+  echo "  そのコマンドが tools_<role> で既に許可されているなら、この拒否は誤警報です"
+  echo "  （例: tools_verifier は Bash(git log:*) / Bash(git diff:*) を既に配っています）。"
+  echo "  ただし誤警報でも dispatch は止まるので、進めるには次のどれかが必要です:"
+  echo "    - [project] の test / lint を、既にある許可で実行できるコマンドに書き換える"
+  echo "    - extra_tools に Bash 許可を足す。ただし extra_tools は全ロールに効くため、"
+  echo "      Verifier などの権限も同時に広がります。狭い許可で足りるなら広げないでください"
+  echo "      例: extra_tools = [\"Bash(pnpm:*)\", \"Bash(npx:*)\", \"Bash(node:*)\"]"
+  echo "    - test/lint を持たないプロジェクトなら [project] の test / lint を \"\" にする"
   extra_label='（空）'
   if [ -n "$extra" ]; then
     extra_label="$(printf '%s' "$extra" | tr '\n' ',')"
