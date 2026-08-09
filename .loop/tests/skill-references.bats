@@ -83,6 +83,7 @@ skill_files() {
   # 常に合格してしまう（実際にそうなっていた）
   CANDIDATES="$(skill_files | xargs grep -h 'loops/runs' 2>/dev/null \
     | grep 'maker' | grep -E 'wc[[:space:]]*-l' || true)"
+  [ -n "$CANDIDATES" ] || { echo "集計式が見つからない。/loop-status から集計をなくしたなら、このテストも更新すること"; false; }
 
   BAD=""
   while IFS= read -r line; do
