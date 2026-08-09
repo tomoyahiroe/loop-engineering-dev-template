@@ -8,6 +8,7 @@
       "Bash(gh pr:*)",
       "Bash(git:*)",
       "Bash(.loop/bin/loop-config:*)",
+      "Bash(.loop/bin/loop-doctor:*)",
       "Bash(.loop/bin/loop-gate:*)",
       "Bash(.loop/bin/preview:*)",
       "Bash(.loop/bin/firing --dry-run)",
