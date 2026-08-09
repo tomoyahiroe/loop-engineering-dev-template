@@ -48,6 +48,62 @@ teardown() { cleanup_test_repo; rm -rf "$TMP"; }
   printf 'これは TOML ではない [[[\n' > "$LOOP_DIR/config.toml"
   run "$LOOP_REAL_DIR/bin/loop-doctor"
   [ "$status" -eq 1 ]
+  [[ "$output" == *"NG   config 構文"* ]]
+}
+
+# --- 最終レビューの修正: 読めない入力から答えを出さない -----------------------
+
+@test "config を読めないとき、後続の検査は OK ではなく SKIP になる" {
+  # コードレビュー指摘: config が読めないのに project/tools 検査が
+  # 「OK … 未設定」と答えていた（読んでいない入力から OK を出していた）。
+  # さらに生の TOML パースエラーが結果行の間に混ざり、「各行は OK/NG/SKIP で
+  # 始まる」という出力形式の契約も壊れていた
+  printf 'これは TOML ではない [[[\n' > "$LOOP_DIR/config.toml"
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"SKIP project/tools 対応"* ]]
+  [[ "$output" == *"SKIP cron 発火時刻"* ]]
+  [[ "$output" != *"OK   project/tools 対応"* ]]
+  [[ "$output" != *"OK   cron 発火時刻"* ]]
+  # 出力形式の契約（生のパースエラーが行の間に漏れていない）
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    [[ "$line" == OK* || "$line" == NG* || "$line" == SKIP* ]]
+  done <<< "$output"
+}
+
+@test "依存が入っていないだけの状態を config 構文エラーと誤診しない" {
+  # クローン直後は .loop/node_modules が無い（gitignore されている）。
+  # このとき loop-config は ERR_MODULE_NOT_FOUND で落ちるが、これは
+  # config.toml の内容とは無関係。「TOML の構文を確認する」と案内すると、
+  # ユーザーは完全に妥当なファイルを延々と読み直すことになる
+  STUB="$TEST_TMP/nodestub"
+  mkdir -p "$STUB"
+  cat > "$STUB/node" <<'EOF'
+#!/usr/bin/env bash
+echo "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'smol-toml'" >&2
+exit 1
+EOF
+  chmod +x "$STUB/node"
+  PATH="$STUB:$PATH" run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"NG   実行環境"* ]]
+  [[ "$output" == *"npm ci"* ]]
+  [[ "$output" != *"NG   config 構文"* ]]
+  [[ "$output" != *"TOML の構文"* ]]
+  [[ "$output" == *"SKIP config 構文"* ]]
+}
+
+@test "node が無ければ実行環境が NG になり、config は SKIP になる" {
+  # /usr/bin:/bin に node がある環境ではこの経路を作れないので飛ばす
+  if PATH=/usr/bin:/bin command -v node >/dev/null 2>&1; then
+    skip "この環境では PATH から node を外せない"
+  fi
+  PATH="$BATS_TEST_DIRNAME/fixtures/bin:/usr/bin:/bin" run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"NG   実行環境"* ]]
+  [[ "$output" == *"node"* ]]
+  [[ "$output" == *"SKIP config 構文"* ]]
 }
 
 @test "コンテナが動いていなければ NG、認証は SKIP になる" {
@@ -61,12 +117,24 @@ teardown() { cleanup_test_repo; rm -rf "$TMP"; }
   [ "$status" -eq 0 ]
 }
 
-@test "claude の認証が切れていたら NG" {
+@test "claude が起動できなければ NG" {
   DOCKER_CLAUDE_EXIT=1 run "$LOOP_REAL_DIR/bin/loop-doctor"
   [ "$status" -eq 1 ]
-  # "claude" という文字列だけだと OK 行（"claude 認証: コンテナ内で利用できる"）
-  # にも常に出るため真になってしまう。NG 行そのものに絞って確認する
-  [[ "$output" == *"NG   claude 認証"* ]]
+  # "claude" という文字列だけだと OK 行にも常に出るため真になってしまう。
+  # NG 行そのものに絞って確認する
+  [[ "$output" == *"NG   claude CLI"* ]]
+}
+
+@test "claude 認証は「確認できない」と言う（--version の成功を認証済みと報告しない）" {
+  # コードレビュー指摘: `claude --version` は認証が切れていても 0 で終わる。
+  # それを「claude 認証: コンテナ内で利用できる」と報告するのは、確かめて
+  # いないことを報告していることになる。検査名を実際に確かめたこと
+  # （CLI が起動する）に合わせ、認証は SKIP として明示する
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OK   claude CLI"* ]]
+  [[ "$output" == *"SKIP claude 認証"* ]]
+  [[ "$output" != *"OK   claude 認証"* ]]
 }
 
 # --- Task 3 Fix round 1 で追加・更新した回帰テスト ---------------------------
@@ -115,6 +183,34 @@ teardown() { cleanup_test_repo; rm -rf "$TMP"; }
   [[ "$output" == *"worktree 残骸: なし"* ]]
 }
 
+@test "空白を含むパスの残骸 worktree でも、1 件 1 行で境界が曖昧にならない" {
+  # コードレビュー指摘: 残骸パスを空白で連結していたため、空白を含むパスが
+  # 混ざると境界が消え、対応表が案内する
+  # `git worktree remove --force <path>` のコピペが別の worktree を消し得た
+  git -C "$REPO_ROOT" worktree add --detach -q "$TEST_TMP/my repo-verify-pr-8" main
+  git -C "$REPO_ROOT" worktree add --detach -q "$TEST_TMP/repo-verify-pr-9" main
+  WT8="$(git -C "$REPO_ROOT" worktree list --porcelain | grep 'verify-pr-8$' | sed 's/^worktree //')"
+  [ -n "$WT8" ]
+
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 1 ]
+  # 2 件が別々の行に出る（各行はちょうど 1 つのパスを含む）
+  N_LINES="$(printf '%s\n' "$output" | grep -c '^NG   worktree 残骸')"
+  [ "$N_LINES" -eq 2 ]
+  [[ "$output" == *"$WT8"* ]]
+  # 出力形式の契約は保たれている
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    [[ "$line" == OK* || "$line" == NG* || "$line" == SKIP* ]]
+  done <<< "$output"
+
+  # 出力に出たパスをそのまま渡せば片付く
+  git -C "$REPO_ROOT" worktree remove --force "$WT8"
+  git -C "$REPO_ROOT" worktree remove --force "$TEST_TMP/repo-verify-pr-9"
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [[ "$output" == *"worktree 残骸: なし"* ]]
+}
+
 @test "生きた所有者のいる worktree は残骸として報告しない" {
   git -C "$REPO_ROOT" worktree add --detach -q "$TEST_TMP/repo-verify-pr-9" main
   printf '%s\n' "$$" > "$REPO_ROOT/loops/.wt-owner-verify-pr-9"
@@ -125,6 +221,40 @@ teardown() { cleanup_test_repo; rm -rf "$TMP"; }
 @test "cron の発火時刻を報告する" {
   run "$LOOP_REAL_DIR/bin/loop-doctor"
   [[ "$output" == *"1,3,5"* ]]
+}
+
+# --- 最終レビューの修正: 丸め込まれた発火回数を OK と言わない -----------------
+# gen-crontab は壊れた crontab を吐かないために異常値を安全側へ丸め、何を
+# 丸めたかを stderr にだけ知らせる。doctor がその stderr を捨てると、
+# 「12 回/日を頼んだのに 1 回/日で回り続ける」が OK として報告される
+# （設計書がこの検査の存在理由として名指ししている壊れ方）
+
+@test "firings_per_day が数値でなければ NG（丸め込みを OK と報告しない）" {
+  printf '[schedule]\nfirings_per_day = "twelve"\n\n[project]\ntest = ""\nlint = ""\n' \
+    > "$LOOP_DIR/config.toml"
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"NG   cron 発火時刻"* ]]
+  [[ "$output" == *"twelve"* ]]
+  [[ "$output" != *"OK   cron 発火時刻"* ]]
+}
+
+@test "24 を割り切らない firings_per_day も NG（設定と実際のズレを黙らせない）" {
+  printf '[schedule]\nfirings_per_day = 5\nstart_hour = 0\n\n[project]\ntest = ""\nlint = ""\n' \
+    > "$LOOP_DIR/config.toml"
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"NG   cron 発火時刻"* ]]
+}
+
+@test "設定どおりの発火回数なら OK で、実際の回数も出す" {
+  printf '[schedule]\nfirings_per_day = 4\nstart_hour = 0\n\n[project]\ntest = ""\nlint = ""\n' \
+    > "$LOOP_DIR/config.toml"
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OK   cron 発火時刻"* ]]
+  [[ "$output" == *"0,6,12,18"* ]]
+  [[ "$output" == *"4 回/日"* ]]
 }
 
 @test "--quiet は失敗した項目だけを出す" {
@@ -156,8 +286,9 @@ teardown() { cleanup_test_repo; rm -rf "$TMP"; }
   [ "$status" -eq 1 ]
   NG_COUNT="$(printf '%s\n' "$output" | grep -c '^NG')"
   [ "$NG_COUNT" -eq 1 ]
+  # claude CLI / claude 認証 / gh 認証 / ラベル の 4 件
   SKIP_COUNT="$(printf '%s\n' "$output" | grep -c '^SKIP')"
-  [ "$SKIP_COUNT" -eq 3 ]
+  [ "$SKIP_COUNT" -eq 4 ]
 }
 
 @test "config.toml が [project] を全く持たなくてもクラッシュしない" {
@@ -466,6 +597,71 @@ teardown() { cleanup_test_repo; rm -rf "$TMP"; }
   [ "$status" -eq 1 ]
   [[ "$output" == *"NG   project/tools 対応"* ]]
   [[ "$output" == *"git"* ]]
+}
+
+# --- 最終レビューの修正: コンテナ稼働と provider 差 --------------------------
+
+@test "コンテナ名に running が含まれていても、State が running でなければ NG" {
+  # コードレビュー指摘: `docker compose ps --format json` の塊全体を
+  # 'running' で grep していたため、リポジトリのディレクトリ名から作られる
+  # Name に "running" が含まれるだけで、クラッシュを繰り返しているコンテナが
+  # 「稼働中」と報告された
+  DOCKER_PS_JSON='[{"Service":"loop","Name":"my-running-repo-loop-1","State":"exited"}]' \
+    run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"NG   コンテナ稼働"* ]]
+}
+
+@test "State が running なら OK（正常系が退行していない）" {
+  DOCKER_PS_JSON='[{"Service":"loop","Name":"my-running-repo-loop-1","State":"running"}]' \
+    run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OK   コンテナ稼働"* ]]
+}
+
+@test "provider が claude 以外なら doctor は NG ではなく SKIP（実行時ガードと同じ答え）" {
+  # コードレビュー指摘: 実行時ガードは provider != claude で早期 return して
+  # 通すのに、doctor 側にはその判定が無く NG と言っていた（doctor が NG・
+  # 実行時は OK という、以前に塞いだのとは逆向きの食い違い）
+  use_ccusage_stub ok
+  use_mock_agent   # provider = "mock" / test = pnpm / extra_tools は空
+
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [[ "$output" == *"SKIP project/tools 対応"* ]]
+  [[ "$output" != *"NG   project/tools 対応"* ]]
+
+  LOOP_SKIP_VERIFIER=1 run "$LOOP_REAL_DIR/bin/dispatch-maker" 77
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"REFUSED"* ]]
+}
+
+@test "狭い許可（Bash(pnpm test:*)）でも doctor は OK、dispatch も止まらない" {
+  # コードレビュー指摘: Bash(cmd:*) / Bash(cmd) の 2 形しか受け付けず、
+  # サブコマンドまで絞った**より狭い＝より安全な**形
+  # （defaults.toml の tools_verifier 自身が使っている Bash(git log:*) の形）を
+  # 「許可が無い」と判定して、3 つの dispatcher すべての起動を拒否していた
+  use_ccusage_stub ok
+  printf '[agent]\nprovider = "claude"\n\n[project]\ntest = "pnpm test"\nlint = ""\n\n[agents.claude]\nextra_tools = ["Bash(pnpm test:*)"]\n' \
+    > "$LOOP_DIR/config.toml"
+
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"NG"* ]]
+  [[ "$output" == *"OK   project/tools 対応"* ]]
+
+  use_claude_agent
+  LOOP_SKIP_VERIFIER=1 run "$LOOP_REAL_DIR/bin/dispatch-maker" 78
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"REFUSED"* ]]
+}
+
+@test "狭い許可でも別コマンドは覆わない（Bash(pnpm test:*) は make を許可しない）" {
+  printf '[project]\ntest = "make test"\nlint = ""\n\n[agents.claude]\nextra_tools = ["Bash(pnpm test:*)"]\n' \
+    > "$LOOP_DIR/config.toml"
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"NG   project/tools 対応"* ]]
+  [[ "$output" == *"make"* ]]
 }
 
 @test "round 3 までの判定表は退行していない（7 行すべて）" {
