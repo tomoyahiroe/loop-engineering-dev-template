@@ -108,7 +108,12 @@ while IFS= read -r line; do
           OWNER=""
           [ -f "$OWNER_FILE" ] && OWNER="$(cat "$OWNER_FILE" 2>/dev/null)"
           if [ -z "$OWNER" ] || ! kill -0 "$OWNER" 2>/dev/null; then
-            STALE="$STALE $KEY"
+            # キー（verify-pr-N）ではなく実パス（$WT）を出す。人間もエージェントも
+            # git worktree remove --force <path> にそのまま渡せるようにするため
+            # （コードレビュー指摘: 以前はキーしか出しておらず、直し方の対応表が
+            # 示す git worktree remove --force <path> を実行するのに、別途
+            # git worktree list でパスを組み立て直す必要があった）
+            STALE="$STALE $WT"
           fi
           ;;
       esac
@@ -118,7 +123,7 @@ done < <(git worktree list --porcelain 2>/dev/null)
 if [ -z "$STALE" ]; then
   emit OK "worktree 残骸" "なし"
 else
-  emit NG "worktree 残骸" "所有者のいない検証用 worktree:${STALE}（その PR の検証が止まる）"
+  emit NG "worktree 残骸" "所有者のいない検証用 worktree:${STALE}（git worktree remove --force <path> で片付ける。その PR の検証は止まる）"
 fi
 
 # --- 5. コンテナ稼働 ------------------------------------------------------

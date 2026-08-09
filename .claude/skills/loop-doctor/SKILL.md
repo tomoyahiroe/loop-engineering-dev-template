@@ -39,7 +39,7 @@ description: ハーネスの健全性を検査する読み取り専用スキル�
 | NG の項目 | 直し方 |
 |---|---|
 | config 構文 | `.loop/config.toml` の TOML 構文を直す |
-| project/tools 対応 | `.loop/config.toml` の `[agents.claude] extra_tools` に、`[project]` の test/lint を実行できるツールを足す |
+| project/tools 対応 | `.loop/config.toml` の `[agents.claude] extra_tools` に、`[project]` の test/lint を実行できるツールを足す。ただしこの検査は `extra_tools` しか見ない（`tools_<role>` で既に許可済みなら誤警報の可能性あり）。`extra_tools` は全ロールに効くので、狭い許可で足りるなら広げない |
 | cron 発火時刻 | `.loop/config.toml` の `[schedule]` を確認する |
 | worktree 残骸 | `git worktree remove --force <path>` |
 | コンテナ稼働 | `docker compose -f docker/compose.yml up -d` |

@@ -69,11 +69,50 @@ teardown() { cleanup_test_repo; rm -rf "$TMP"; }
   [[ "$output" == *"NG   claude 認証"* ]]
 }
 
-@test "所有者のいない検証用 worktree を検出する" {
+# --- Task 3 Fix round 1 で追加・更新した回帰テスト ---------------------------
+# コードレビュー指摘: 「worktree 残骸」の NG は所有者のいない worktree を
+# verify-pr-N というキーでしか報告しておらず、/loop-doctor スキルの対応表が
+# 案内する `git worktree remove --force <path>` の <path> を人間もエージェントも
+# 出力から取れなかった（別途 git worktree list を叩いてパスを組み立て直す
+# 必要があった）。loop-doctor 側でキーではなく実パス（$WT）を出すよう修正し、
+# 対応表のコマンドがそのままコピペで機能することをテストで固定する
+
+@test "所有者のいない検証用 worktree を検出する（実パスが出力に含まれ、そのままコピペできる）" {
   git -C "$REPO_ROOT" worktree add --detach -q "$TEST_TMP/repo-verify-pr-9" main
+  # git worktree list --porcelain が実際に返すパスを別途取得する（symlink 解決
+  # などで $TEST_TMP と一致しないことがあるため、doctor と同じ経路で取る）
+  WT_PATH="$(git -C "$REPO_ROOT" worktree list --porcelain | awk '/verify-pr-9/{print $2}')"
+  [ -n "$WT_PATH" ]
+
   run "$LOOP_REAL_DIR/bin/loop-doctor"
   [ "$status" -eq 1 ]
   [[ "$output" == *"verify-pr-9"* ]]
+  # コードレビュー指摘: 以前はキー（verify-pr-9）しか出しておらず、
+  # `git worktree remove --force <path>` を実行するには別途
+  # git worktree list でパスを組み立て直す必要があった。実パスがそのまま
+  # 出力に含まれていること（単なるキー文字列ではなく実在パスであること）を
+  # 直接確認する
+  [[ "$output" == *"$WT_PATH"* ]]
+  [[ "$WT_PATH" == */repo-verify-pr-9 ]]
+}
+
+@test "doctor が出す実パスをそのまま git worktree remove --force に渡すと片付く（対応表の手順が実際に機能することの確認）" {
+  git -C "$REPO_ROOT" worktree add --detach -q "$TEST_TMP/repo-verify-pr-9" main
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"NG   worktree 残骸"* ]]
+
+  # NG 行に出た文字列から抜き出すのではなく、出力に含まれているはずの実パスを
+  # git 自身から取り直して、それをそのまま remove --force に渡す。これは
+  # 「対応表のコマンドをコピペしたら実際に直る」ことの確認であり、対応表の
+  # 記述と loop-doctor の出力が食い違っていない（プレースホルダではなく
+  # 実行可能な値になっている）ことを保証する
+  WT_PATH="$(git -C "$REPO_ROOT" worktree list --porcelain | awk '/verify-pr-9/{print $2}')"
+  [[ "$output" == *"$WT_PATH"* ]]
+  git -C "$REPO_ROOT" worktree remove --force "$WT_PATH"
+
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [[ "$output" == *"worktree 残骸: なし"* ]]
 }
 
 @test "生きた所有者のいる worktree は残骸として報告しない" {
