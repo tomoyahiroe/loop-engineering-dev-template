@@ -63,13 +63,38 @@ skill_files() {
 
 @test "スキルが数える dispatch 数の式が firing の N_TODAY と一致する" {
   # P1 で実際にズレた箇所。firing は .retry.md を除外するが、
-  # /loop-status がそれを数えていた（3 対 2 の食い違い）
-  FIRING_EXPR="$(grep -oE 'ls "?loops/runs/[^|]*\| *grep -v[^|]*\| *wc -l' "$REPO/.loop/bin/firing" | head -1)"
-  [ -n "$FIRING_EXPR" ]
-  # スキル側に maker のログを数える式があるなら、.retry.md の除外を含むこと
+  # /loop-status がそれを数えていた（3 対 2 の食い違い）。
+  #
+  # firing 側から「.retry.md を除外する grep -v の式」を実際に取り出し、
+  # スキル側の式にそれが（空白・引用符の違いを無視して）含まれているかを
+  # 突き合わせる。「retry という文字列を含むか」のような弱い判定にすると、
+  # grep -v ではなく grep（除外ではなく抽出）でも「retry を含む」という
+  # 理由で誤って一致したことにされてしまう
+  FIRING_LINE="$(grep -E 'N_TODAY=' "$REPO/.loop/bin/firing" | head -1)"
+  [ -n "$FIRING_LINE" ] || { echo "firing に N_TODAY の代入行が見つからない"; false; }
+  FIRING_GREP="$(printf '%s' "$FIRING_LINE" | grep -oE "grep -v '[^']*'" | head -1)"
+  [ -n "$FIRING_GREP" ] || { echo "firing の N_TODAY 行から grep -v の式を取り出せない"; false; }
+  FIRING_NORM="$(printf '%s' "$FIRING_GREP" | tr -d '[:space:]' | tr -d "'\"")"
+
+  # スキル側で「maker の dispatch ログを loops/runs から数えて wc -l する」
+  # 記述を広く拾う。ls / find など表現を書き換えても抽出網から漏れないよう、
+  # わざと緩いネットにしてある。狭いネットだと、書き換えただけで対象行が
+  # 一件も見つからず while の本体が一度も走らず、検査そのものが空回りして
+  # 常に合格してしまう（実際にそうなっていた）
+  CANDIDATES="$(skill_files | xargs grep -h 'loops/runs' 2>/dev/null \
+    | grep 'maker' | grep -E 'wc[[:space:]]*-l' || true)"
+
+  BAD=""
   while IFS= read -r line; do
-    [[ "$line" == *"retry"* ]] || { echo "retry 除外を含まない集計式: $line"; false; }
-  done < <(skill_files | xargs grep -ohE 'ls loops/runs/[^`]*maker[^`]*wc -l' || true)
+    [ -n "$line" ] || continue
+    NORM_LINE="$(printf '%s' "$line" | tr -d '[:space:]' | tr -d "'\"")"
+    case "$NORM_LINE" in
+      *"$FIRING_NORM"*) : ;;
+      *) BAD="$BAD"$'\n'"$line" ;;
+    esac
+  done <<< "$CANDIDATES"
+
+  [ -z "$BAD" ] || { echo "firing の retry 除外 [$FIRING_GREP] と一致しない集計式:$BAD"; false; }
 }
 
 @test "プロンプトが指示する gh コマンドが、その role の許可リストに含まれている" {
