@@ -22,7 +22,11 @@ description: dev-loop テンプレートをクローンした直後の対話セ�
 
 `docker` / `git` があるか確認する。`gh` は無くてもよい（⑤でコンテナ経由に切り替える）。
 
-無いものがあれば、入れ方を示して**そこで止める**。
+`docker` はコマンドの有無だけでなく `docker info` でデーモンに到達できるかも
+確認する（コマンドはあってもデーモンが止まっていると⑥のビルドまで気づけない）。
+
+無いものがあれば、入れ方を示して**そこで止める**。デーモンに到達できなければ、
+起動を促して**そこで止める**。
 
 ## ② プロジェクトの検出
 
@@ -73,12 +77,24 @@ RUN corepack enable && corepack prepare pnpm@latest --activate
 ループが動くのに必要な 3 つを作る。**これが無いと待ち行列も
 エスカレーションもエラーを出さずに機能しない。**
 
-ホストに `gh` があり認証済みならホストで、無ければ⑥のあとコンテナ経由で実行する。
+ホストに `gh` があり認証済みならホストで実行する。
 
 ```bash
 gh label create loop:ready      --color 0E8A16 --description "ゲート通過済み。次の firing で着手する" --force
 gh label create needs-human     --color D93F0B --description "人間の判断が要る。ループは触らない"      --force
 gh label create loop:auto-merge --color 1D76DB --description "L3 で自動 merge を許可する（人間が付ける）" --force
+```
+
+ホストに `gh` が無い、または未認証の場合はこの場では実行せず、**⑦で
+`gh auth login` を済ませたあと**にコンテナ経由で実行する（コンテナ内の
+`gh` は⑦より前は未認証なので、ここで叩いても失敗する）:
+
+```bash
+docker compose -f docker/compose.yml exec loop bash -lc '
+gh label create loop:ready      --color 0E8A16 --description "ゲート通過済み。次の firing で着手する" --force
+gh label create needs-human     --color D93F0B --description "人間の判断が要る。ループは触らない"      --force
+gh label create loop:auto-merge --color 1D76DB --description "L3 で自動 merge を許可する（人間が付ける）" --force
+'
 ```
 
 `--force` を付けているので何度実行しても安全。
