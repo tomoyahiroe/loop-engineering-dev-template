@@ -30,18 +30,40 @@ else
 fi
 
 # --- 2. [project] と extra_tools の対応 ------------------------------------
-# ここが崩れると Verifier がテストを実行せず diff だけでレビューする
+# ここが崩れると Verifier がテストを実行せず diff だけでレビューする。
+# 判定は require_project_tools_allowed（実行時ガード、common.sh）と共通の
+# project_tools_check を使う。ここだけ別ロジックにすると「doctor は OK と
+# 言うのに実行時は拒否される」食い違いが起こるため、必ず同じ関数を呼ぶ
 P_TEST="$(cfg project.test || echo '')"
 P_LINT="$(cfg project.lint || echo '')"
-N_TOOLS="$("$BIN_DIR/loop-config" get agents.claude.extra_tools 2>/dev/null | grep -c . || true)"
-if [ -z "$P_TEST" ] && [ -z "$P_LINT" ]; then
-  emit OK "project/tools 対応" "test も lint も未設定（ループはテストを実行しない）"
-elif [ "$N_TOOLS" -gt 0 ]; then
-  emit OK "project/tools 対応" "extra_tools が ${N_TOOLS} 件"
-else
-  emit NG "project/tools 対応" \
-    "[project] に test/lint があるのに extra_tools が空。Verifier がテストを実行できない"
-fi
+EXTRA_RAW="$("$BIN_DIR/loop-config" get agents.claude.extra_tools 2>/dev/null || echo '')"
+PT_RESULT="$(project_tools_check "$P_TEST" "$P_LINT" "$EXTRA_RAW")"
+case "$PT_RESULT" in
+  ok|"ok "*)
+    PT_FOUND="${PT_RESULT#ok}"
+    PT_FOUND="${PT_FOUND# }"
+    if [ -z "$PT_FOUND" ]; then
+      emit OK "project/tools 対応" "test も lint も未設定（ループはテストを実行しない）"
+    else
+      emit OK "project/tools 対応" "test/lint が使うコマンド（${PT_FOUND}）に対応する Bash 許可がある"
+    fi
+    ;;
+  "ambiguous "*)
+    N_TOOLS="${PT_RESULT#ambiguous }"
+    if [ "$N_TOOLS" -gt 0 ] 2>/dev/null; then
+      emit OK "project/tools 対応" \
+        "extra_tools が ${N_TOOLS} 件（コマンドの形が複雑で内容までは確認できないため件数のみで判定）"
+    else
+      emit NG "project/tools 対応" \
+        "[project] に test/lint があるのに extra_tools が空。Verifier がテストを実行できない"
+    fi
+    ;;
+  "missing "*)
+    PT_MISSING="${PT_RESULT#missing }"
+    emit NG "project/tools 対応" \
+      "test/lint が使うコマンド（${PT_MISSING}）に対応する Bash 許可が extra_tools に無い。Verifier がテストを実行できない"
+    ;;
+esac
 
 # --- 3. cron 発火時刻 -----------------------------------------------------
 CRON_LINE="$("$BIN_DIR/gen-crontab" 2>/dev/null)"
@@ -52,18 +74,35 @@ else
 fi
 
 # --- 4. worktree 残骸 -----------------------------------------------------
+# dispatch-verifier が作る検証用 worktree は
+# "$(basename "$REPO_ROOT")-verify-pr-<PR番号>" という名前（REPO_ROOT の
+# 兄弟ディレクトリ）。判定はパス全体ではなく worktree のベース名（末尾の
+# パス要素）に対して行い、かつ "-verify-pr-" の後ろが数字だけであることまで
+# 確認する。パス全体の部分一致で判定すると、リポジトリ自身やその親ディレクトリ
+# の名前に "-verify-pr-" が含まれるだけで（例: リポジトリ名
+# "my-verify-pr-template"）プライマリ worktree 自身を検証用の残骸と誤認し、
+# 健全な状態でも毎回 NG を出し続ける
 STALE=""
 while IFS= read -r line; do
   case "$line" in
-    "worktree "*"-verify-pr-"*)
+    "worktree "*)
       WT="${line#worktree }"
-      KEY="verify-pr-${WT##*-verify-pr-}"
-      OWNER_FILE="$REPO_ROOT/loops/.wt-owner-$KEY"
-      OWNER=""
-      [ -f "$OWNER_FILE" ] && OWNER="$(cat "$OWNER_FILE" 2>/dev/null)"
-      if [ -z "$OWNER" ] || ! kill -0 "$OWNER" 2>/dev/null; then
-        STALE="$STALE $KEY"
-      fi
+      BASE="${WT##*/}"
+      case "$BASE" in
+        *-verify-pr-*)
+          NUM="${BASE##*-verify-pr-}"
+          case "$NUM" in
+            ''|*[!0-9]*) continue ;;  # 末尾が数字でなければ対象外（誤検知防止）
+          esac
+          KEY="verify-pr-$NUM"
+          OWNER_FILE="$REPO_ROOT/loops/.wt-owner-$KEY"
+          OWNER=""
+          [ -f "$OWNER_FILE" ] && OWNER="$(cat "$OWNER_FILE" 2>/dev/null)"
+          if [ -z "$OWNER" ] || ! kill -0 "$OWNER" 2>/dev/null; then
+            STALE="$STALE $KEY"
+          fi
+          ;;
+      esac
       ;;
   esac
 done < <(git worktree list --porcelain 2>/dev/null)

@@ -8,7 +8,11 @@ DEFAULT_PS_JSON='[]'
 # loop-doctor は `docker compose -f docker/compose.yml <sub> ...` の形で呼ぶ。
 # -f <file> が compose と <sub> の間に挟まるため、$1 $2 だけを見ると
 # "compose -f" にしかならず sub コマンドを取り逃す。-f とその値を読み飛ばして
-# 最初に残ったトークンを sub コマンドとして拾う
+# 最初に残ったトークンを sub コマンドとして拾う。
+# 読み飛ばすのは -f のみ（loop-doctor が実際に使うのはこれだけ）。
+# `docker --context foo compose ps` のような compose より前のグローバル
+# フラグや `--profile` のような -f 以外のフラグには対応していない
+# （loop-doctor がそれらを使うようになったらここも合わせて直す）
 SUB=""
 skip_next=0
 for a in "$@"; do

@@ -36,6 +36,150 @@ retry_delay() {
   cfg retry.delay_seconds
 }
 
+# --- [project] の test/lint と extra_tools の対応判定 -----------------------
+# loop-doctor（診断）と require_project_tools_allowed（実行時ガード、下）の
+# 両方がここを呼ぶ。判定をここ 1 箇所に集約することで、「doctor は OK と
+# 言うのに実行時は拒否される」ような食い違い（P1 で何度も踏んだ「部品同士が
+# 黙って矛盾する」パターン）が起こらないようにする。
+
+# project.test / project.lint のようなシェルコマンド文字列から、実行される
+# コマンド名を抜き出す（先頭トークン、および && ; | の後ろの先頭トークン）。
+# クォートは shell の入れ子規則どおりに読み飛ばす（例: echo 'a && b' の
+# 中の && は区切りとして扱わない）。ただしコマンド置換・リダイレクト・
+# `||`・バックスラッシュ・`sh -c "..."` のように実際に実行されるコマンドが
+# 引数の中に隠れる形は、自信を持って解析できないので何も出力せず終了コード
+# 1 を返す。呼び出し側はこれを「件数チェックにフォールバックする」合図として
+# 扱うこと（解析できないことを理由に通してしまうより、解析できないと言う
+# ほうが安全側）
+extract_command_names() {
+  local raw="$1"
+  local i len ch in_squote in_dquote seg segs cmd
+
+  case "$raw" in
+    *'$('*|*'`'*|*'<'*|*'>'*|*'||'*|*'|&'*|*'\'*)
+      return 1
+      ;;
+  esac
+
+  len=${#raw}
+  in_squote=0
+  in_dquote=0
+  seg=""
+  segs=""
+  i=0
+  while [ "$i" -lt "$len" ]; do
+    ch="${raw:$i:1}"
+    if [ "$in_squote" = 1 ]; then
+      seg="$seg$ch"
+      [ "$ch" = "'" ] && in_squote=0
+    elif [ "$in_dquote" = 1 ]; then
+      seg="$seg$ch"
+      [ "$ch" = '"' ] && in_dquote=0
+    else
+      case "$ch" in
+        "'") in_squote=1; seg="$seg$ch" ;;
+        '"') in_dquote=1; seg="$seg$ch" ;;
+        '&'|';'|'|')
+          segs="$segs
+$seg"
+          seg=""
+          ;;
+        *) seg="$seg$ch" ;;
+      esac
+    fi
+    i=$((i + 1))
+  done
+  segs="$segs
+$seg"
+
+  # クォートが閉じきらずに終わった＝解析を諦める
+  [ "$in_squote" = 1 ] && return 1
+  [ "$in_dquote" = 1 ] && return 1
+
+  while IFS= read -r seg; do
+    [ -z "$seg" ] && continue
+    read -r cmd _ <<< "$seg"
+    [ -z "$cmd" ] && continue
+    case "$cmd" in
+      # 実際に実行されるコマンドが引数の中に隠れる形は解析を諦める
+      sh|bash|zsh|dash|env|xargs|eval|nohup|time|sudo|command)
+        return 1
+        ;;
+    esac
+    printf '%s\n' "$cmd"
+  done <<< "$segs"
+  return 0
+}
+
+# コマンド名 $1 に対応する Bash 許可が $2（loop-config get の生出力、
+# 改行区切り）の中にあるか
+extra_tools_covers_cmd() {
+  local cmd="$1" tools="$2" line
+  while IFS= read -r line; do
+    case "$line" in
+      "Bash($cmd:"*|"Bash($cmd)") return 0 ;;
+    esac
+  done <<< "$tools"
+  return 1
+}
+
+# project.test / project.lint を実行できるツール許可が揃っているかを判定する。
+# $1 = project.test（空文字可）, $2 = project.lint（空文字可）,
+# $3 = extra_tools（loop-config get の生出力、改行区切り。空でもよい）
+# 標準出力に判定結果を 1 行:
+#   ok [<確認できたコマンド...>]  未設定で不要、またはコマンドが全部揃っている
+#   ambiguous <N>                 解析に自信が持てない。N=extra_tools の件数
+#                                  （中身を見ない件数チェックへのフォールバック）
+#   missing <コマンド...>         解析はできたが、許可が足りないコマンドがある
+project_tools_check() {
+  local test_cmd="$1" lint_cmd="$2" tools="$3"
+  local confident names all_names missing found cmd n_tools
+
+  if [ -z "$test_cmd" ] && [ -z "$lint_cmd" ]; then
+    echo ok
+    return 0
+  fi
+
+  confident=1
+  all_names=""
+  if [ -n "$test_cmd" ]; then
+    names="$(extract_command_names "$test_cmd")" || confident=0
+    [ -n "$names" ] && all_names="$all_names
+$names"
+  fi
+  if [ -n "$lint_cmd" ]; then
+    names="$(extract_command_names "$lint_cmd")" || confident=0
+    [ -n "$names" ] && all_names="$all_names
+$names"
+  fi
+
+  if [ "$confident" -ne 1 ]; then
+    n_tools="$(printf '%s\n' "$tools" | grep -c . || true)"
+    echo "ambiguous $n_tools"
+    return 0
+  fi
+
+  missing=""
+  found=""
+  while IFS= read -r cmd; do
+    [ -z "$cmd" ] && continue
+    case " $found $missing " in
+      *" $cmd "*) continue ;;
+    esac
+    if extra_tools_covers_cmd "$cmd" "$tools"; then
+      if [ -z "$found" ]; then found="$cmd"; else found="$found $cmd"; fi
+    else
+      if [ -z "$missing" ]; then missing="$cmd"; else missing="$missing $cmd"; fi
+    fi
+  done <<< "$all_names"
+
+  if [ -n "$missing" ]; then
+    echo "missing $missing"
+  else
+    echo "ok $found"
+  fi
+}
+
 # [project] の test/lint を実行できるツール許可があるかを確認する。
 # 許可がなければ 1 を返す（呼び出し側は起動を拒否する）。
 #
@@ -54,7 +198,7 @@ retry_delay() {
 # （許可リストは無人実行の唯一の安全境界）。extra_tools に何か 1 つでも
 # 書かれていれば「人間が意図して設定した」とみなして通す。
 require_project_tools_allowed() {
-  local provider extra test_cmd lint_cmd marker
+  local provider extra test_cmd lint_cmd marker result n missing extra_label
   provider="$(cfg agent.provider 2>/dev/null || echo '')"
   # 許可リストの意味論は provider 固有（agents/claude.sh のコメント参照）。
   # extra_tools を読まない provider（テスト用の mock 等）には適用しない
@@ -65,26 +209,54 @@ require_project_tools_allowed() {
   test_cmd="$(cfg project.test 2>/dev/null || echo '')"
   lint_cmd="$(cfg project.lint 2>/dev/null || echo '')"
 
-  if [ -n "$extra" ] || { [ -z "$test_cmd" ] && [ -z "$lint_cmd" ]; }; then
-    # 設定が直った（または test/lint を持たないプロジェクト）。次に壊れたとき
-    # また 1 回だけ報告できるよう、マーカーを片付けてから通す
-    rm -f "$marker" 2>/dev/null || true
-    return 0
-  fi
+  # 判定は project_tools_check（上）に一本化してある。loop-doctor も同じ
+  # 関数を呼ぶので、ここと doctor が違う答えを返すことは構造的に起こらない
+  result="$(project_tools_check "$test_cmd" "$lint_cmd" "$extra")"
+  missing=""
+  case "$result" in
+    ok|"ok "*)
+      # 設定が直った（または test/lint を持たないプロジェクト）。次に壊れたとき
+      # また 1 回だけ報告できるよう、マーカーを片付けてから通す
+      rm -f "$marker" 2>/dev/null || true
+      return 0
+      ;;
+    "ambiguous "*)
+      n="${result#ambiguous }"
+      # 中身までは解析できなかった。何か 1 つでも extra_tools が設定されて
+      # いれば「人間が意図して設定した」とみなして通す（従来どおりの
+      # 件数ベースのフォールバック。誤って拒否するより誤って通すほうが
+      # 実害が小さい設計判断はここでも変えない）
+      if [ "$n" -gt 0 ] 2>/dev/null; then
+        rm -f "$marker" 2>/dev/null || true
+        return 0
+      fi
+      ;;
+    "missing "*)
+      missing="${result#missing }"
+      ;;
+  esac
 
   echo "REFUSED: [project] の test/lint を実行できるツール許可がありません。"
+  if [ -n "$missing" ]; then
+    echo "  次のコマンドに対応する Bash 許可が extra_tools に見当たりません: $missing"
+  fi
   echo "  .loop/config.toml の [agents.claude] extra_tools に、そのコマンドを"
   echo "  実行できる Bash 許可を追加してください。"
   echo "  例: extra_tools = [\"Bash(pnpm:*)\", \"Bash(npx:*)\", \"Bash(node:*)\"]"
   echo "  test/lint を持たないプロジェクトなら [project] の test / lint を \"\" にしてください。"
-  echo "  現在の設定: test=\"$test_cmd\" lint=\"$lint_cmd\" extra_tools=（空）"
+  extra_label='（空）'
+  if [ -n "$extra" ]; then
+    extra_label="$(printf '%s' "$extra" | tr '\n' ',')"
+    extra_label="${extra_label%,}"
+  fi
+  echo "  現在の設定: test=\"$test_cmd\" lint=\"$lint_cmd\" extra_tools=${extra_label}"
 
   # 設定ミスは tick を跨いでも自然には直らない持続的な原因なので、STATE.md
   # （人間が毎朝読む一次情報）への記録はローカルマーカーで 1 回に抑える
   # （gate-remediation・L3 merge 失敗と同じ方式）。原則も同じ:
   # 「以後の報告を抑制する操作（マーカー作成）は informative な手より後」
   if [ ! -f "$marker" ]; then
-    record_state "dispatch 中止: [project] の test/lint を実行するツール許可がない（[agents.claude] extra_tools が空）"
+    record_state "dispatch 中止: [project] の test/lint を実行するツール許可がない（[agents.claude] extra_tools が対応していない）"
     touch "$marker" 2>/dev/null || true
   fi
   return 1
