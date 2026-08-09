@@ -266,12 +266,16 @@ teardown() { cleanup_test_repo; rm -rf "$TMP"; }
   [[ "$output" == *"OK   project/tools 対応"* ]]
 }
 
-@test "read-only な git サブコマンド（git status）は組み込み扱いで許可が要らない" {
+@test "git は（サブコマンドを問わず）許可が必要。round 4 で組み込み扱いを撤去した" {
+  # round 2 ではこの設定を「git status は read-only な組み込みだから OK」と
+  # していた。round 4 で git の特別扱いを撤去したため NG になる（詳しい理由は
+  # common.sh の GIT_READONLY_SUBCMDS 撤去コメント、および下の round 4 節）
   printf '[project]\ntest = "git status && npm test"\nlint = ""\n\n[agents.claude]\nextra_tools = ["Bash(npm:*)"]\n' \
     > "$LOOP_DIR/config.toml"
   run "$LOOP_REAL_DIR/bin/loop-doctor"
-  [ "$status" -eq 0 ]
-  [[ "$output" != *"NG"* ]]
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"NG   project/tools 対応"* ]]
+  [[ "$output" == *"git"* ]]
 }
 
 @test "書き込みになり得る git サブコマンド（git branch）は保守的に許可が必要なまま" {
@@ -354,4 +358,102 @@ teardown() { cleanup_test_repo; rm -rf "$TMP"; }
   [ "$status" -eq 1 ]
   [[ "$output" == *"NG   project/tools 対応"* ]]
   [[ "$output" == *"pnpm"* ]]
+}
+
+# --- Fix round 4 で追加した回帰テスト ---------------------------------------
+# GIT_READONLY_SUBCMDS（「read-only な git サブコマンド」の手組み一覧）を
+# 撤去し、git を pnpm や make と全く同じに扱うようにした。round 3 で
+# symbolic-ref を外した直後、残っていた 14 件のうち 6 件（log/diff/show/
+# blame/shortlog/rev-list）が --output=<path> でリポジトリ外のファイルを
+# 上書きできることが実測で分かったため、一覧を「また 1 件直す」のではなく
+# 消した。理由の詳細は common.sh の該当コメント。
+
+@test "git を使う test は Bash(git:*) が無ければ NG（doctor・実行時ガードとも）" {
+  printf '[agent]\nprovider = "claude"\n\n[project]\ntest = "git status && npm test"\nlint = ""\n\n[agents.claude]\nextra_tools = ["Bash(npm:*)"]\n' \
+    > "$LOOP_DIR/config.toml"
+
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"NG   project/tools 対応"* ]]
+  [[ "$output" == *"git"* ]]
+  # 何を足せばいいのかが分かる形で名指しされていること（この NG の代償は
+  # 「人間が 1 行足せば直る」ことが前提なので、名指しは仕様の一部）
+  [[ "$output" == *"extra_tools"* ]]
+
+  use_claude_agent
+  run "$LOOP_REAL_DIR/bin/dispatch-maker" 11
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"REFUSED"* ]]
+  [[ "$output" == *"git"* ]]
+}
+
+@test "git を使う test は Bash(git:*) を足せば OK（doctor・実行時ガードとも）" {
+  printf '[agent]\nprovider = "claude"\n\n[project]\ntest = "git status && npm test"\nlint = ""\n\n[agents.claude]\nextra_tools = ["Bash(npm:*)", "Bash(git:*)"]\n' \
+    > "$LOOP_DIR/config.toml"
+
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"NG"* ]]
+  [[ "$output" == *"OK   project/tools 対応"* ]]
+
+  use_claude_agent
+  run "$LOOP_REAL_DIR/bin/dispatch-maker" 12
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"REFUSED"* ]]
+}
+
+@test "git log --output=<path> はリポジトリ外を上書きできる。組み込み扱いしないので NG になる" {
+  # 一覧を撤去した直接の引き金。`git log --output=<外部ファイル>` は exit 0 で
+  # 任意のファイルをコミットログで上書きする（実測済み）。サブコマンド名
+  # （log）だけを見て read-only と判定すると、この設定が「健全」と報告される
+  printf '[project]\ntest = "git log --output=/tmp/loop-doctor-should-not-be-written"\nlint = ""\n\n[agents.claude]\nextra_tools = ["Bash(npm:*)"]\n' \
+    > "$LOOP_DIR/config.toml"
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"NG   project/tools 対応"* ]]
+  [[ "$output" == *"git"* ]]
+}
+
+@test "git diff を許可が必要にしても、単体の POSIX diff は組み込みのまま（両者は無関係）" {
+  # permissions.md の組み込み一覧にある diff は standalone の diff コマンドで
+  # あって git diff とは別物。git の特別扱いを外した副作用で diff まで
+  # 巻き込んでいないことを直接固定する
+  printf '[project]\ntest = "diff expected.txt actual.txt"\nlint = ""\n\n[agents.claude]\nextra_tools = []\n' \
+    > "$LOOP_DIR/config.toml"
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"NG"* ]]
+
+  printf '[project]\ntest = "git diff --exit-code"\nlint = ""\n\n[agents.claude]\nextra_tools = []\n' \
+    > "$LOOP_DIR/config.toml"
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"NG   project/tools 対応"* ]]
+  [[ "$output" == *"git"* ]]
+}
+
+@test "round 3 までの判定表は退行していない（7 行すべて）" {
+  # コーディネーターが「これは全部正しい、壊すな」と明示した組み合わせ。
+  # git の撤去がこれらのどれにも触れていないことを 1 テストで直接固定する
+  check_row() { # $1 = test, $2 = extra_tools の中身, $3 = 期待する終了コード
+    printf '[project]\ntest = "%s"\nlint = ""\n\n[agents.claude]\nextra_tools = [%s]\n' \
+      "$1" "$2" > "$LOOP_DIR/config.toml"
+    run "$LOOP_REAL_DIR/bin/loop-doctor"
+    [ "$status" -eq "$3" ] || {
+      echo "row failed: test=$1 extra=$2 expected=$3 got=$status"
+      echo "$output"
+      return 1
+    }
+  }
+
+  check_row 'pnpm -r test'     '"Bash(make:*)"' 1
+  check_row 'cd web && npm test' '"Bash(npm:*)"' 0
+  check_row 'CI=true npm test' '"Bash(npm:*)"' 0
+  check_row 'A=1 B=2 pnpm test' '"Bash(pnpm:*)"' 0
+  check_row 'CI=true npm test' '"Bash(make:*)"' 1
+  check_row 'echo skip'        '' 0
+
+  printf '[project]\ntest = ""\nlint = ""\n\n[agents.claude]\nextra_tools = []\n' > "$LOOP_DIR/config.toml"
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 0 ]
 }

@@ -58,17 +58,42 @@ retry_delay() {
 # 誤って出す方が、含め過ぎて壊れた設定を OK と報告するより安全）
 BUILTIN_READONLY_CMDS="ls cat echo pwd head tail grep find wc which diff stat du"
 
-# git は「read-only な形」だけが組み込み扱いで、サブコマンド次第。公式
-# ドキュメントはサブコマンドの厳密な一覧までは挙げていないため、ここでは
-# 疑いようのない読み取り専用サブコマンドだけの保守的な部分集合を使う。
-# branch / tag / remote / config / checkout はフラグ次第で書き込みになり
-# 得るため、意図的にこの一覧へ含めない（`tr` のときと同じ理由で、確信が
-# 持てないものは「組み込み」に分類しない）。symbolic-ref も同じ理由で
-# 除外する: `git symbolic-ref HEAD refs/heads/x` は引数次第で HEAD を
-# 書き換える（実測で確認済み）。判断がつかないサブコマンドは含めない方を
-# 選ぶ — 含め損ねると正しい設定が弾かれるだけだが、誤って含めると壊れた
-# 設定を健全と報告してしまい、この検査が防ぐはずの偽陰性そのものになる
-GIT_READONLY_SUBCMDS="status log diff show blame describe rev-parse ls-files ls-tree cat-file shortlog rev-list merge-base name-rev"
+# git は組み込み扱いしない。公式ドキュメントの「read-only forms of git」は
+# ここでは実装せず、他のコマンドと全く同じに扱う（extra_tools に
+# Bash(git:*) 等が無ければ不足として NG にする）。
+#
+# なぜ実装しないのか（round 2〜4 で 3 度作り直した「read-only サブコマンドの
+# 一覧」を、4 度目に足すのではなく消した理由。再導入しないこと）:
+#
+# 1. git が read-only かどうかはサブコマンド名では決まらず、引数で決まる。
+#    round 3 で symbolic-ref を外した直後、一覧に残っていた 14 件のうち
+#    log / diff / show / blame / shortlog / rev-list の 6 件が、汎用オプション
+#    --output=<path> でリポジトリ外の任意のファイルを上書きできることが
+#    分かった（実測: `git log --output=<外部ファイル>` が exit 0 で
+#    コミットログを書き込み、元の内容を破壊した）。--output= のような
+#    汎用オプションは git 全体に広く継承されるため、名前で列挙する限り
+#    「まだ見つかっていない書き込み経路」が常に残る。
+# 2. 公式ドキュメント（https://code.claude.com/docs/en/permissions.md
+#    「Read-only commands」）はサブコマンドの一覧を一切示していない。
+#    それどころか git を "commands with write-capable or exec-capable flags,
+#    such as find, sort, sed, and git" と、書き込み可能フラグを持つ側の例として
+#    名指ししている。つまり Claude Code 自身もサブコマンド名では分類していない。
+#    同ページはさらに「cd と git の組み合わせは cd が別ディレクトリへ移る場合
+#    プロンプトになる」とも書いており、`cd packages/web && git ...`（このハーネス
+#    が推奨する monorepo の書き方）は read-only な git であっても通らない。
+# 3. 2 方向の誤りは対称ではない。誤って除外すると、動く設定が止まるが、
+#    人間が extra_tools に 1 行足せば直る — 見えるし、直せるし、自分から
+#    名乗り出る失敗。誤って含めると、壊れたハーネスを「健全」と報告し、
+#    Verifier はテストを 1 つも実行せず diff だけで approve し続ける —
+#    誰も気付かない。この検査が防ぐために存在する失敗そのもの。
+# 4. 代償は小さく、上限がある。[project] の test/lint が素の git 呼び出しを
+#    含む構成は稀で、起きたときは NG メッセージが「git に対応する Bash 許可が
+#    無い」と名指しするので、直し方は自明。
+#
+# 「判断がつかないものは含めない」という round 3 で明文化した原則を、
+# git については「そもそも判断がつかない領域なので一覧を持たない」という
+# 形まで進めたもの。次に触る人へ: read-only な git サブコマンドの一覧を
+# 足したくなったら、まず上の 1 を再現してから考えること。
 
 # $1 が、空白区切りの一覧 $2 に単語として含まれるか
 is_word_in_list() {
@@ -82,8 +107,9 @@ is_word_in_list() {
 # の許可が必要なコマンド名を抜き出す（先頭トークン、および && ; | の後ろの
 # 先頭トークン。ただし CI=true npm test のような先頭の環境変数代入
 # （VAR=val、複数連続も可）は読み飛ばし、その後ろの実コマンドを見る）。
-# Claude Code の組み込み read-only コマンド（上の BUILTIN_READONLY_CMDS /
-# GIT_READONLY_SUBCMDS）は許可が要らないので、ここで除外して出力しない。
+# Claude Code の組み込み read-only コマンド（上の BUILTIN_READONLY_CMDS と
+# 相対パスへの cd）は許可が要らないので、ここで除外して出力しない。
+# git は除外しない（上のコメント参照。他のコマンドと同じ扱い）。
 # クォートは shell の入れ子規則どおりに読み飛ばす（例: echo 'a && b' の
 # 中の && は区切りとして扱わない）。ただしコマンド置換・リダイレクト・
 # `||`・バックスラッシュ・`sh -c "..."` のように実際に実行されるコマンドが
@@ -93,7 +119,7 @@ is_word_in_list() {
 # ほうが安全側）
 extract_command_names() {
   local raw="$1"
-  local i len ch in_squote in_dquote seg segs cmd rest sub cd_target
+  local i len ch in_squote in_dquote seg segs cmd rest cd_target
 
   case "$raw" in
     *'$('*|*'`'*|*'<'*|*'>'*|*'||'*|*'|&'*|*'\'*)
@@ -176,12 +202,10 @@ $seg"
         /*) : ;;
         *) continue ;;
       esac
-    elif [ "$cmd" = "git" ]; then
-      read -r sub _ <<< "$rest"
-      if is_word_in_list "$sub" "$GIT_READONLY_SUBCMDS"; then
-        continue  # 読み取り専用サブコマンドの組み込み扱い
-      fi
     fi
+    # git にサブコマンド単位の例外は設けない。サブコマンド名では read-only か
+    # どうかが決まらないため（--output= 等。上の長いコメント参照）、
+    # pnpm や make と同じく extra_tools の許可を要求する
 
     printf '%s\n' "$cmd"
   done <<< "$segs"
