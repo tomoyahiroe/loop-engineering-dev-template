@@ -45,6 +45,68 @@ teardown() { cleanup_test_repo; rm -rf "$TMP"; }
   [[ "$output" == *"extra_tools"* ]]
 }
 
+# --- 「まだ設定していない」を第 3 の状態として扱う -----------------------------
+# クローン直後の [project] はテンプレートのプレースホルダ
+# （echo '...' && false）なので、素朴に解析すると false が「許可の足りない
+# コマンド」として名指しされ、**新規ユーザーが最初に見る画面**が
+# 「false に対応する Bash 許可を足せ」になっていた。
+# かといって空文字にすると「テストを持たないプロジェクト」として OK になり、
+# 設定が必要なことそのものが隠れる（プレースホルダは、設定を忘れたら
+# ループが大声で失敗するために意図的に置かれている）。
+
+@test "プレースホルダのままなら NG。false を名指しせず /loop-setup を案内する" {
+  printf '[project]\ntest = "echo '"'"'project.test を設定してください'"'"' && false"\nlint = "echo '"'"'project.lint を設定してください'"'"' && false"\n\n[agents.claude]\nextra_tools = []\n' \
+    > "$LOOP_DIR/config.toml"
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"NG   project/tools 対応"* ]]
+  [[ "$output" == *"/loop-setup"* ]]
+  [[ "$output" == *"既定値のまま"* ]]
+  # 不足コマンドの列挙をしない（false を名指ししない）
+  [[ "$output" != *"（false）"* ]]
+  [[ "$output" != *"Bash 許可が extra_tools に無い"* ]]
+}
+
+@test "同梱の config.toml の [project] は「未設定」として検出される（文言がずれたらここが落ちる）" {
+  # is_placeholder_project_cmd の一覧は .loop/config.toml と
+  # .loop/defaults.toml に書かれている値そのもの。片方だけ書き換えると
+  # プレースホルダが実コマンドとして解析され、false を名指しする NG に戻る。
+  # 同梱値を実際に読み出して突き合わせ、ズレたらここで落とす
+  REPO="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
+  T="$(env LOOP_DIR="$REPO/.loop" "$LOOP_REAL_DIR/bin/loop-config" get project.test)"
+  L="$(env LOOP_DIR="$REPO/.loop" "$LOOP_REAL_DIR/bin/loop-config" get project.lint)"
+  [ -n "$T" ]
+  printf '[project]\ntest = "%s"\nlint = "%s"\n\n[agents.claude]\nextra_tools = []\n' "$T" "$L" \
+    > "$LOOP_DIR/config.toml"
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"NG   project/tools 対応"* ]]
+  [[ "$output" == *"/loop-setup"* ]]
+  [[ "$output" != *"（false）"* ]]
+}
+
+@test "defaults.toml のプレースホルダ（config.toml が [project] を持たない場合）も「未設定」" {
+  printf '[agents.claude]\nextra_tools = []\n' > "$LOOP_DIR/config.toml"
+  run "$LOOP_REAL_DIR/bin/loop-doctor"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"NG   project/tools 対応"* ]]
+  [[ "$output" == *"/loop-setup"* ]]
+  [[ "$output" != *"（false）"* ]]
+}
+
+@test "プレースホルダのときは実行時ガードも同じことを言う（doctor と食い違わない）" {
+  printf '[agent]\nprovider = "claude"\n\n[project]\ntest = "echo '"'"'project.test を設定してください'"'"' && false"\nlint = ""\n\n[agents.claude]\nextra_tools = []\n' \
+    > "$LOOP_DIR/config.toml"
+  use_claude_agent
+  run "$LOOP_REAL_DIR/bin/dispatch-maker" 90
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"REFUSED"* ]]
+  [[ "$output" == *"/loop-setup"* ]]
+  [[ "$output" != *"次のコマンドに対応する Bash 許可"* ]]
+  run cat "$REPO_ROOT/loops/STATE.md"
+  [[ "$output" == *"未設定"* ]]
+}
+
 @test "test も lint も空なら extra_tools が空でも OK" {
   printf '[project]\ntest = ""\nlint = ""\n\n[agents.claude]\nextra_tools = []\n' > "$LOOP_DIR/config.toml"
   run "$LOOP_REAL_DIR/bin/loop-doctor"

@@ -45,6 +45,7 @@ description: ハーネスの健全性を検査する読み取り専用スキル�
 |---|---|
 | 実行環境 | ホストに Node.js 18 以上を入れる／`cd .loop && npm ci --omit=dev` で依存を入れる。**これは `config.toml` の中身とは無関係**（`.loop/node_modules` は gitignore されているので、クローン直後は必ずこの状態） |
 | config 構文 | `.loop/config.toml` の TOML 構文を直す（NG 行にパーサのメッセージが 1 行だけ添えてある） |
+| project/tools 対応（「既定値のまま」と出た場合） | `[project]` がテンプレートのプレースホルダのまま＝**まだ設定していない**。`/loop-setup` を実行する（test/lint の検出と `extra_tools` をセットで書き込む）。テストを持たないプロジェクトなら test / lint を `""` にする |
 | project/tools 対応 | `.loop/config.toml` の `[agents.claude] extra_tools` に、`[project]` の test/lint を実行できるツールを足す。ただしこの検査は `extra_tools` しか見ない（`tools_<role>` で既に許可済みなら誤警報の可能性あり）。`extra_tools` は全ロールに効くので、狭い許可で足りるなら広げない（`Bash(pnpm test:*)` のようにサブコマンドまで絞った形でよい） |
 | cron 発火時刻 | `.loop/config.toml` の `[schedule] firings_per_day` を **24 を割り切る整数**にする。NG 行には実際に生成された発火時刻と、`gen-crontab` が何をどう丸めたかが出る |
 | worktree 残骸 | `git worktree remove --force <path>`（残骸 1 件につき NG が 1 行出る。パスはその行のものをそのまま使う） |

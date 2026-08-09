@@ -95,6 +95,23 @@ BUILTIN_READONLY_CMDS="ls cat echo pwd head tail grep find wc which diff stat du
 # 形まで進めたもの。次に触る人へ: read-only な git サブコマンドの一覧を
 # 足したくなったら、まず上の 1 を再現してから考えること。
 
+# $1 が「テンプレートが同梱する [project] の既定値（プレースホルダ）」か。
+#
+# 一覧は .loop/defaults.toml と .loop/config.toml の [project] に書かれている
+# 値そのもの。**片方を書き換えたらここも直すこと**（文言がズレると
+# プレースホルダが「ユーザーが設定した実コマンド」として解析され、
+# `false` を名指しする無意味な NG に戻る）。ズレたら loop-doctor.bats の
+# 「同梱の…プレースホルダは未設定として検出される」が落ちる
+is_placeholder_project_cmd() {
+  case "$1" in
+    "echo 'project.test を設定してください' && false") return 0 ;;
+    "echo 'project.lint を設定してください' && false") return 0 ;;
+    "echo 'project.test が未設定です' && false") return 0 ;;
+    "echo 'project.lint が未設定です' && false") return 0 ;;
+  esac
+  return 1
+}
+
 # $1 が、空白区切りの一覧 $2 に単語として含まれるか
 is_word_in_list() {
   case " $2 " in
@@ -261,7 +278,8 @@ extra_tools_covers_cmd() {
 # 標準出力に判定結果を 1 行:
 #   not-applicable                provider が claude ではない。許可リストの
 #                                  意味論は provider 固有なので判定できない
-#   unneeded                      test も lint も未設定で、そもそも確認が要らない
+#   placeholder                   テンプレート同梱の既定値のまま。まだ設定されていない
+#   unneeded                      test も lint も未設定（空文字）で、そもそも確認が要らない
 #   ok [<確認できたコマンド...>]   test/lint はあるが、必要なコマンドは組み込み
 #                                  read-only か extra_tools で全部揃っている。
 #                                  末尾のコマンド一覧は空のこともある
@@ -291,6 +309,20 @@ project_tools_check() {
 
   if [ -z "$test_cmd" ] && [ -z "$lint_cmd" ]; then
     echo unneeded
+    return 0
+  fi
+
+  # 「まだ設定していない」は「テストを持たない」とも「設定済み」とも違う、
+  # 第 3 の状態として扱う。プレースホルダをそのまま解析すると
+  # `echo '...' && false` の false が「許可の足りないコマンド」として名指しされ、
+  # クローンした人が最初に見る画面が「false に対応する Bash 許可を足せ」に
+  # なる（読めば読むほど間違った方向へ進む案内）。かといって空文字に
+  # すると「テストを持たないプロジェクト」として OK になり、設定が必要な
+  # ことそのものが隠れる。プレースホルダは「設定を忘れたらループが大声で
+  # 失敗する」ために意図的に置かれているので、ここでは名前を付けて
+  # 「未設定である」と言い切る
+  if is_placeholder_project_cmd "$test_cmd" || is_placeholder_project_cmd "$lint_cmd"; then
+    echo placeholder
     return 0
   fi
 
@@ -393,6 +425,25 @@ require_project_tools_allowed() {
       missing="${result#missing }"
       ;;
   esac
+
+  # プレースホルダのままなら「未設定」として拒否する。ここで通常の
+  # 「許可が足りない」文面を出すと、テンプレートの `echo '...' && false` の
+  # false を名指しして「false の許可を足せ」と読める案内になる。
+  # 拒否すること自体は変えない（設定を忘れたらループが大声で失敗するのが
+  # プレースホルダの役目）が、伝えるのは「まだ設定していない」ことと
+  # 「/loop-setup で設定できる」ことにする
+  if [ "$result" = placeholder ]; then
+    echo "REFUSED: [project] の test / lint がテンプレートの既定値のままです（まだ設定されていません）。"
+    echo "  ホストで /loop-setup を実行すると、このプロジェクトの test / lint を検出して、"
+    echo "  対応する [agents.claude] extra_tools と一緒に .loop/config.toml へ書き込みます。"
+    echo "  テストを持たないプロジェクトなら [project] の test / lint を \"\" にしてください"
+    echo "  （その場合ループはテストを実行しません）。"
+    if [ ! -f "$marker" ]; then
+      record_state "dispatch 中止: [project] の test/lint が未設定（テンプレートの既定値のまま）。/loop-setup で設定する"
+      touch "$marker" 2>/dev/null || true
+    fi
+    return 1
+  fi
 
   echo "REFUSED: [project] の test/lint を実行できるツール許可がありません。"
   if [ -n "$missing" ]; then

@@ -84,6 +84,14 @@ else
       emit SKIP "project/tools 対応" \
         "agent.provider が claude ではない（${P_PROVIDER}）。ツール許可リストの意味論は provider 固有なので、この検査は適用されない"
       ;;
+    placeholder)
+      # 「まだ設定していない」を、不足コマンドの列挙ではなく未設定として伝える。
+      # クローン直後はこれが人間の見る最初の画面になるので、テンプレートの
+      # プレースホルダ（echo '...' && false）に含まれる false を名指しして
+      # 「false の許可を足せ」と読める案内を出さない
+      emit NG "project/tools 対応" \
+        "[project] の test / lint がテンプレートの既定値のまま（まだ設定されていない）。ホストで /loop-setup を実行すると、このプロジェクトの test / lint を検出して extra_tools と一緒に .loop/config.toml へ書き込む。テストを持たないプロジェクトなら test / lint を \"\" にする"
+      ;;
     unneeded)
       emit OK "project/tools 対応" "test も lint も未設定（ループはテストを実行しない）"
       ;;
