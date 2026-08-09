@@ -7,6 +7,7 @@
       "Bash(gh issue:*)",
       "Bash(gh pr:*)",
       "Bash(git:*)",
+      "Bash(.loop/bin/detect-project:*)",
       "Bash(.loop/bin/loop-config:*)",
       "Bash(.loop/bin/loop-doctor:*)",
       "Bash(.loop/bin/loop-gate:*)",
