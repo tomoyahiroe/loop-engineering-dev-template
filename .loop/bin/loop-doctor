@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# ハーネスの健全性を検査する。設定の崩れは静かに起きるので、いつでも叩けるようにする。
+# 用法: loop-doctor [--quiet]
+#   終了コード 0 = 全項目合格 / 1 = 1 件以上の失敗
+#   SKIP は失敗として数えない（確認できないことと壊れていることは違う）
+set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
+BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$REPO_ROOT" || exit 1
+
+QUIET=0
+[ "${1:-}" = "--quiet" ] && QUIET=1
+
+FAILED=0
+COMPOSE=(docker compose -f docker/compose.yml)
+
+emit() { # $1 = OK|NG|SKIP, $2 = 検査名, $3 = 補足
+  case "$1" in
+    NG) FAILED=$((FAILED + 1)) ;;
+  esac
+  if [ "$QUIET" = 1 ] && [ "$1" != "NG" ]; then return 0; fi
+  printf '%-4s %s: %s\n' "$1" "$2" "$3"
+}
+
+# --- 1. config 構文 -------------------------------------------------------
+if "$BIN_DIR/loop-config" dump >/dev/null 2>&1; then
+  emit OK "config 構文" "$LOOP_DIR/config.toml は妥当"
+else
+  emit NG "config 構文" "${LOOP_DIR}/config.toml を読めない。TOML の構文を確認する"
+fi
+
+# --- 2. [project] と extra_tools の対応 ------------------------------------
+# ここが崩れると Verifier がテストを実行せず diff だけでレビューする
+P_TEST="$(cfg project.test || echo '')"
+P_LINT="$(cfg project.lint || echo '')"
+N_TOOLS="$("$BIN_DIR/loop-config" get agents.claude.extra_tools 2>/dev/null | grep -c . || true)"
+if [ -z "$P_TEST" ] && [ -z "$P_LINT" ]; then
+  emit OK "project/tools 対応" "test も lint も未設定（ループはテストを実行しない）"
+elif [ "$N_TOOLS" -gt 0 ]; then
+  emit OK "project/tools 対応" "extra_tools が ${N_TOOLS} 件"
+else
+  emit NG "project/tools 対応" \
+    "[project] に test/lint があるのに extra_tools が空。Verifier がテストを実行できない"
+fi
+
+# --- 3. cron 発火時刻 -----------------------------------------------------
+CRON_LINE="$("$BIN_DIR/gen-crontab" 2>/dev/null)"
+if [ -n "$CRON_LINE" ]; then
+  emit OK "cron 発火時刻" "$(printf '%s' "$CRON_LINE" | awk '{print $2}') 時"
+else
+  emit NG "cron 発火時刻" "gen-crontab が行を出せない"
+fi
+
+# --- 4. worktree 残骸 -----------------------------------------------------
+STALE=""
+while IFS= read -r line; do
+  case "$line" in
+    "worktree "*"-verify-pr-"*)
+      WT="${line#worktree }"
+      KEY="verify-pr-${WT##*-verify-pr-}"
+      OWNER_FILE="$REPO_ROOT/loops/.wt-owner-$KEY"
+      OWNER=""
+      [ -f "$OWNER_FILE" ] && OWNER="$(cat "$OWNER_FILE" 2>/dev/null)"
+      if [ -z "$OWNER" ] || ! kill -0 "$OWNER" 2>/dev/null; then
+        STALE="$STALE $KEY"
+      fi
+      ;;
+  esac
+done < <(git worktree list --porcelain 2>/dev/null)
+if [ -z "$STALE" ]; then
+  emit OK "worktree 残骸" "なし"
+else
+  emit NG "worktree 残骸" "所有者のいない検証用 worktree:${STALE}（その PR の検証が止まる）"
+fi
+
+# --- 5. コンテナ稼働 ------------------------------------------------------
+CONTAINER_UP=0
+PS_JSON="$("${COMPOSE[@]}" ps --format json 2>/dev/null)"
+if printf '%s' "$PS_JSON" | grep -q 'running'; then
+  CONTAINER_UP=1
+  emit OK "コンテナ稼働" "loop サービスが running"
+else
+  emit NG "コンテナ稼働" "loop サービスが動いていない。docker compose -f docker/compose.yml up -d"
+fi
+
+# --- 6/7/8. コンテナの中を見る検査 -----------------------------------------
+if [ "$CONTAINER_UP" = 0 ]; then
+  emit SKIP "claude 認証" "コンテナが動いていないので確認できない"
+  emit SKIP "gh 認証" "コンテナが動いていないので確認できない"
+  emit SKIP "ラベル" "コンテナが動いていないので確認できない"
+else
+  if "${COMPOSE[@]}" exec -T loop claude --version >/dev/null 2>&1; then
+    emit OK "claude 認証" "コンテナ内で利用できる"
+  else
+    emit NG "claude 認証" "コンテナ内の claude が使えない。docker compose -f docker/compose.yml exec loop claude"
+  fi
+
+  GH_OK=0
+  if "${COMPOSE[@]}" exec -T loop gh auth status >/dev/null 2>&1; then
+    GH_OK=1
+    emit OK "gh 認証" "コンテナ内で認証済み"
+  else
+    emit NG "gh 認証" "コンテナ内の gh が未認証。docker compose -f docker/compose.yml exec loop gh auth login"
+  fi
+
+  if [ "$GH_OK" = 0 ]; then
+    emit SKIP "ラベル" "gh が未認証なので確認できない"
+  else
+    LABELS="$("${COMPOSE[@]}" exec -T loop gh label list --json name 2>/dev/null)"
+    MISSING=""
+    for L in loop:ready needs-human loop:auto-merge; do
+      printf '%s' "$LABELS" | grep -q "\"$L\"" || MISSING="$MISSING $L"
+    done
+    if [ -z "$MISSING" ]; then
+      emit OK "ラベル" "3 つとも存在する"
+    else
+      emit NG "ラベル" "不足:${MISSING}（キューもエスカレーションも黙って機能しない）"
+    fi
+  fi
+fi
+
+[ "$FAILED" -eq 0 ] && exit 0
+exit 1
