@@ -24,6 +24,10 @@ description: 毎日 1 回・30〜60 分の Loop ミーティング。①前回�
 
 ## ① 前回の結果を見る（必須・飛ばさない）
 
+まず `.loop/bin/loop-doctor` を実行する。NG があれば、その日の作業に入る前に
+報告する（設定が壊れたままループを回しても、静かに空回りするだけになる）。
+SKIP は失敗ではないので、NG と混ぜて報告しない。
+
 自分で調べる: `loops/STATE.md` / `gh pr list --state open` / `gh issue list --state open` /
 `git log --oneline -10` / `git worktree list` / 直近の `loops/runs/*-verifier-pr-*.md`
 

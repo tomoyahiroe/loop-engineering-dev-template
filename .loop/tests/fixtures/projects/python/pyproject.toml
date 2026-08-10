@@ -1,0 +1,6 @@
+[project]
+name = "sample"
+dependencies = ["ruff>=0.4"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

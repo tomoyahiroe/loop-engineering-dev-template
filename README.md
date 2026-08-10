@@ -6,75 +6,107 @@ Maker → Verifier → 人間の merge が 1 日に複数回自動で回りま�
 人間の役割はマネージャーです。1 日 1 回の朝会（`/loop-mtg`）に出席し、
 前日の成果を確認して、次のタスクを積みます。
 
+## 適用範囲 — 個人リポジトリ専用です
+
+**このテンプレートは、自分ひとりが所有するリポジトリで使うものです。**
+チームで共有しているリポジトリには入れないでください。
+
+ループは GitHub の Issue を待ち行列に、PR を判定の単位に、ラベルを状態機械に
+使います。どれもリポジトリ全体で共有されるものなので、チームのリポジトリに
+入れると、あなたの個人的な実験がそのままチーム全員に見えます。
+
+- ラベル 3 つがチームの Issue トラッカーに生えます
+- Maker が PR を作ります（既定で 1 日 12 回発火します）
+- Issue にループのコメントが付きます
+- `.loop/` と `loops/` で 100 ファイル以上がリポジトリに増えます
+- `maturity = "L3"` にすると、承認済み PR が自動でマージされます
+
+技術的には動きますが、同意なく持ち込んでよい変更ではありません。
+既存の**個人**プロジェクトに導入するのは問題ありません（下の「既存プロジェクトに
+導入する」を参照）。複数の既存リポジトリをまとめて回す用途は、このテンプレートの
+範囲外です。別テンプレートとして分離する予定です。
+
 ## 必要なもの
 
 - Docker（Docker Desktop など）
-- GitHub アカウントとこのリポジトリの push 権限
+- **Node.js 18 以上**（ホスト側。`.loop/bin/*` は node で動きます。
+  `/loop-setup` と `/loop-doctor`、毎朝の `/loop-mtg` がホストからこれを叩きます）
+- Git と、GitHub アカウント + このリポジトリの push 権限
 - Claude Code のサブスクリプション
 
 対象は **macOS / Linux** です。Windows は WSL2 の中で使ってください。
 
-## セットアップ（ターミナルを使うのはここだけ）
+## セットアップ
 
-**必ずリポジトリのルートディレクトリから実行してください。**
-`docker/compose.yml` は `${PWD}`（= docker compose を実行したシェルのカレント
-ディレクトリ）でホストと同じ絶対パスにマウントします。`docker/` の中に
-`cd` してから `docker compose up -d` のように実行すると、マウント先が
-ホストの実際のリポジトリパスとズレて起動に失敗します。
+ターミナルで `claude` を開き、次のように打ちます。
 
-```bash
-cd <このリポジトリのルート>
-docker compose -f docker/compose.yml up -d --build
-docker compose -f docker/compose.yml exec loop claude      # ブラウザでログイン
-docker compose -f docker/compose.yml exec loop gh auth login
+```
+/loop-setup
 ```
 
-この 2 つの `exec`（`claude` と `gh auth login`）は、ブラウザでの認可が要る
-**手動・対話的・一度きり**のステップです。認証情報は名前付き volume
-（`loop-claude-auth` / `loop-gh-auth`）に保存されるので、コンテナを作り直さない
-限り 2 回目以降は不要です。ここから先、ターミナルを開く必要は基本的にありません
-— ループは cron（supercronic）が自動で起こします。
+これだけです。`.loop` の依存インストール、プロジェクトの検出、設定ファイルの生成、
+リモート（`origin`）の確認、GitHub ラベルの作成、
+コンテナのビルドと起動、最後の健全性チェックまでを対話で進めます。
 
-続いて、ループが動くのに必要な 3 つのラベルを GitHub 側に作ります（**必須**）。
+クローンしたままだと `origin` はテンプレート側を指しています。
+`/loop-setup` はラベル作成の前に必ず確認を取りますが、
+**先に自分のリポジトリへ差し替えておくほうが確実です**
+（`gh repo create <name> --private --source=. --remote=origin --push`）。
 
-```bash
-docker compose -f docker/compose.yml exec loop bash -lc '
-gh label create loop:ready      --color 0E8A16 --description "ゲート通過済み。次の firing で着手する" --force
-gh label create needs-human     --color D93F0B --description "人間の判断が要る。ループは触らない"      --force
-gh label create loop:auto-merge --color 1D76DB --description "L3 で自動 merge を許可する（人間が付ける）" --force
-'
+途中 1 回だけ、ブラウザでの認可が必要な手作業があります（`claude` と
+`gh` のログイン）。コマンドはスキルが提示するので、それを実行して戻ってください。
+認証情報は名前付き volume に保存されるので、コンテナを作り直さない限り
+2 回目以降は不要です。
+
+`/loop-setup` は**何度実行しても安全**です。途中で失敗したら、もう一度叩けば
+続きから進みます。
+
+### うまく動かないとき
+
+```
+/loop-doctor
 ```
 
-`--force` を付けているので、既にあるラベルは更新されるだけです（何度実行しても安全）。
+何が壊れているか、放置すると何が起きるか、どう直すかを一覧で出します。
+セットアップ後に設定が崩れたとき（ラベルを消した、認証が切れた、
+`config.toml` を編集して対応が崩れた）にも使えます。
 
-このハーネスはラベルの付け外しをすべて best-effort（失敗しても実行を止めない）で
-行います。**ラベルが存在しないと、待ち行列（`loop:ready`）もエスカレーション
-（`needs-human`）も、エラーを出さないまま機能しません。** ここは飛ばさないでください。
+### 手動でやりたい場合
 
-続いて、この 3 つを自分のプロジェクトに合わせて編集します。
+`/loop-setup` が何をしているかは `.claude/skills/loop-setup/SKILL.md` に
+すべて書いてあります。手で進めたい場合はそれを読んでください。
 
-1. `.loop/config.toml` — **2 か所をセットで**書き換えます
+## 既存プロジェクトに導入する
 
-   ```toml
-   [project]
-   test = "pnpm -r test"      # あなたのプロジェクトのテストコマンド
-   lint = "pnpm -r lint"      # 同 lint コマンド
-   preview = "pnpm dev"       # 任意（MTG で実際に動かして見るため）
+すでに中身のある**個人**リポジトリでループを回す場合は、このテンプレートを
+クローンするのではなく、**ハーネス一式をそのリポジトリにコピー**します。
+ハーネスは「自分が入っているリポジトリ」を対象に動くので、対象リポジトリの
+中に置く必要があります。
 
-   [agents.claude]
-   # ↑ の test / lint を実行するための許可。空のままにしない
-   extra_tools = ["Bash(pnpm:*)", "Bash(npx:*)", "Bash(node:*)"]
-   ```
+```bash
+cd <あなたのプロジェクト>
+D=<dev-loop をクローンした場所>
+cp -R "$D/.loop" "$D/.claude" "$D/docker" .
+mkdir -p loops/runs loops/mtg
+cp "$D/loops/STATE.md" "$D/loops/DECISIONS.md" "$D/loops/INCIDENTS.md" loops/
+cat "$D/.gitignore" >> .gitignore     # 既存の .gitignore に追記する
+```
 
-   エージェントに既定で許可されているツールは `git` と `gh` だけです。
-   `extra_tools` にプロジェクトのツールチェーンを足さないと、**Verifier は
-   テストを 1 つも実行できず、diff を読むだけでレビューする**ことになります
-   （ハーネスの主要な品質シグナルが静かに無効化されます）。
-   そのため、`test` / `lint` が設定されているのに `extra_tools` が空の場合、
-   ループは dispatch を拒否し、理由を `loops/STATE.md` に記録します。
-   テストや lint を持たないプロジェクトなら `test` / `lint` を `""` にしてください。
-2. `docker/Dockerfile` — プロジェクトのツールチェーン（追記して `--build` で再ビルド）
-3. `CLAUDE.md` — ビルド手順と規約
+コピーする対象は `.loop/OWNERSHIP.toml` が定義している配布境界と同じです。
+
+**上書きに注意してください。** `loops/STATE.md` `CLAUDE.md` `.gitignore` は
+同名ファイルがあれば潰します。既存のものがある場合は、コピー前に退避するか
+手で統合してください。
+
+あとは通常どおりです。
+
+```
+/loop-setup
+```
+
+`detect-project` があなたのプロジェクトの `package.json` / `Cargo.toml` /
+`Makefile` / `pyproject.toml` を読んで test / lint / preview を推測するので、
+新規プロジェクトより設定は楽になります。
 
 ## 使い方
 
@@ -88,9 +120,10 @@ gh label create loop:auto-merge --color 1D76DB --description "L3 で自動 merge
 
 ## 最初は L1 から
 
-`.loop/config.toml` の `maturity` は最初 `"L1"` にして、数回の firing で
-「ループが何をしようとしているか」を `loops/STATE.md` で観察してください。
-納得できたら `"L2"` に上げます。
+`.loop/config.toml` の `maturity` は**同梱の時点で `"L1"`** です。
+数回の firing で「ループが何をしようとしているか」を `loops/STATE.md` で
+観察してください。納得できたら自分で `"L2"` に上げます
+（`L1` の間、ループは判定と報告だけを行い、Maker を起動しません）。
 
 | | 動作 |
 |---|---|
@@ -126,6 +159,13 @@ gh label create loop:auto-merge --color 1D76DB --description "L3 で自動 merge
 
 ## コンテナの中でコマンドを叩きたいとき
 
+**`docker compose` は必ずリポジトリのルートディレクトリから実行してください。**
+`docker/compose.yml` は `${PWD}`（= docker compose を実行したシェルのカレント
+ディレクトリ）でホストと同じ絶対パスにマウントします。`docker/` の中に
+`cd` してから実行すると、マウント先がホストの実際のリポジトリパスとズレて
+失敗します（`/loop-setup` はこれを踏まないよう常にリポジトリのルートから
+実行します。手で `docker compose` を叩くときだけ注意してください）。
+
 `docker compose exec loop <cmd>` は常駐中のコンテナの中でコマンドを実行します
 （依存は起動時に入れ済みです）。
 
@@ -140,8 +180,8 @@ gh label create loop:auto-merge --color 1D76DB --description "L3 で自動 merge
 ## テスト
 
 これは開発者がホスト側（自分の Mac/Linux。コンテナの外）で直接叩くコマンドです。
-セットアップの「ターミナルを使うのはここだけ」はループ運用のための操作の話で、
-ハーネス自体の開発・変更時にホストでテストを回すのは対象外です。
+`/loop-setup` はループ運用のための操作で、ハーネス自体の開発・変更時に
+ホストでテストを回すのは対象外です。
 コンテナの中で実行したい場合は上の `docker compose exec loop <cmd>` を使ってください
 （依存インストール済みなので `npm install` は不要です）。
 

@@ -1,7 +1,11 @@
 # このファイルはあなたのもの。テンプレート同期で上書きされない。
 # 全キーと説明は .loop/defaults.toml を見る。
 
-maturity = "L2"
+# 最初は L1（判定と報告だけ。dispatch しない）。数回の firing を
+# loops/STATE.md で観察して納得したら "L2" に上げる。
+# L1 = 判定と報告だけ / L2 = Maker → PR → Verifier まで自動（merge は人間）
+# L3 = L2 に加え、loop:auto-merge 付きの approve 済み PR を自動 merge
+maturity = "L1"
 
 [models]
 maker = "claude-sonnet-5"

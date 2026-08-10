@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# テスト用の docker スタブ。呼び出しを $DOCKER_LOG に記録し、環境変数で応答を決める
+set -uo pipefail
+[ -n "${DOCKER_LOG:-}" ] && echo "$*" >> "$DOCKER_LOG"
+
+DEFAULT_PS_JSON='[]'
+
+# loop-doctor は `docker compose -f docker/compose.yml <sub> ...` の形で呼ぶ。
+# -f <file> が compose と <sub> の間に挟まるため、$1 $2 だけを見ると
+# "compose -f" にしかならず sub コマンドを取り逃す。-f とその値を読み飛ばして
+# 最初に残ったトークンを sub コマンドとして拾う。
+# 読み飛ばすのは -f のみ（loop-doctor が実際に使うのはこれだけ）。
+# `docker --context foo compose ps` のような compose より前のグローバル
+# フラグや `--profile` のような -f 以外のフラグには対応していない
+# （loop-doctor がそれらを使うようになったらここも合わせて直す）
+SUB=""
+skip_next=0
+for a in "$@"; do
+  if [ "$skip_next" = 1 ]; then skip_next=0; continue; fi
+  case "$a" in
+    compose) continue ;;
+    -f) skip_next=1; continue ;;
+  esac
+  SUB="$a"
+  break
+done
+
+case "${1:-} ${SUB}" in
+  "compose ps")
+    echo "${DOCKER_PS_JSON:-$DEFAULT_PS_JSON}"
+    exit "${DOCKER_PS_EXIT:-0}"
+    ;;
+  "compose exec")
+    # 最後の引数側にある実コマンドで応答を変える
+    case "$*" in
+      *"claude"*) exit "${DOCKER_CLAUDE_EXIT:-0}" ;;
+      *"gh auth status"*) exit "${DOCKER_GH_AUTH_EXIT:-0}" ;;
+      *"gh label list"*) echo "${GH_LABEL_LIST_JSON:-[]}"; exit 0 ;;
+      *) exit "${DOCKER_EXEC_EXIT:-0}" ;;
+    esac
+    ;;
+  *) exit "${DOCKER_EXIT:-0}" ;;
+esac

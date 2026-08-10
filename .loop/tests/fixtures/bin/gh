@@ -60,6 +60,9 @@ let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
   # 単体をテストできない。未指定時は既定どおり GH_EXIT にフォールバックする
   # ので、これを使わない既存テストの挙動は一切変わらない
   "pr merge")   exit "${GH_PR_MERGE_EXIT:-${GH_EXIT:-0}}" ;;
+  "label list")   echo "${GH_LABEL_LIST_JSON:-[]}" ;;
+  "label create") exit "${GH_LABEL_CREATE_EXIT:-${GH_EXIT:-0}}" ;;
+  "auth status")  exit "${GH_AUTH_EXIT:-${GH_EXIT:-0}}" ;;
   *) ;;
 esac
 exit "${GH_EXIT:-0}"

@@ -1,0 +1,4 @@
+{
+  "name": "sample",
+  "scripts": { "test": "vitest run", "lint": "eslint .", "dev": "vite" }
+}

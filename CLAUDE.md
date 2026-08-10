@@ -34,7 +34,8 @@
 
 このリポジトリは Loop Engineering のハーネスを持っています。
 
-- 毎日 `claude` を開いて `/loop-mtg` を実行する（30〜60 分）
+- `claude` を開いて `/loop-mtg` を実行する（頻度・所要時間は
+  `.claude/skills/loop-mtg/SKILL.md` を参照）
 - 状況を見るだけなら `/loop-status`
 - ハーネスの設定は `.loop/config.toml`
 - 詳細は `README.md`

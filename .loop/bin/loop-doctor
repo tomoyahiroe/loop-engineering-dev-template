@@ -1,0 +1,292 @@
+#!/usr/bin/env bash
+# ハーネスの健全性を検査する。設定の崩れは静かに起きるので、いつでも叩けるようにする。
+# 用法: loop-doctor [--quiet]
+#   終了コード 0 = 全項目合格 / 1 = 1 件以上の失敗
+#   SKIP は失敗として数えない（確認できないことと壊れていることは違う）
+#
+# 全体を貫く原則: **確認できなかったことは「確認できない」と言う。**
+# OK とも、別の（もっともらしいが誤った）診断名とも言わない。読めなかった
+# 入力から OK を出す／違う病名を付けるのは、この検査が防ぐために存在する
+# 失敗そのものだから（人間は妥当なファイルを延々と読み直すことになる）。
+set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
+BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$REPO_ROOT" || exit 1
+
+QUIET=0
+[ "${1:-}" = "--quiet" ] && QUIET=1
+
+FAILED=0
+COMPOSE=(docker compose -f docker/compose.yml)
+
+emit() { # $1 = OK|NG|SKIP, $2 = 検査名, $3 = 補足
+  case "$1" in
+    NG) FAILED=$((FAILED + 1)) ;;
+  esac
+  if [ "$QUIET" = 1 ] && [ "$1" != "NG" ]; then return 0; fi
+  printf '%-4s %s: %s\n' "$1" "$2" "$3"
+}
+
+# --- 1. 実行環境（host の node と .loop の依存） ---------------------------
+# .loop/bin/* は薄いシェルのラッパで、中身は node（+ smol-toml）で動く。
+# .loop/node_modules は gitignore されていてクローン直後には存在しないため、
+# 「依存がまだ入っていないだけ」という最も普通の初期状態が、設定の読み出し
+# 失敗として現れる。これを config 構文エラーと report すると、人間は完全に
+# 妥当な config.toml を読み直す羽目になる（実際にそうなっていた）。
+# 依存不足と設定の壊れは別の失敗なので、先にここで切り分ける。
+CFG_OUT="$("$BIN_DIR/loop-config" dump 2>&1)"; CFG_RC=$?
+RUNTIME_OK=1
+if ! command -v node >/dev/null 2>&1; then
+  RUNTIME_OK=0
+  emit NG "実行環境" "node が見つからない。${LOOP_DIR}/bin/* は node で動く（Node.js 18 以上をホストに入れる）"
+elif [ "$CFG_RC" -ne 0 ] && printf '%s' "$CFG_OUT" \
+     | grep -qE 'ERR_MODULE_NOT_FOUND|Cannot find package|Cannot find module'; then
+  RUNTIME_OK=0
+  emit NG "実行環境" ".loop の依存が入っていない（config.toml の中身とは無関係）。cd .loop && npm ci --omit=dev"
+else
+  emit OK "実行環境" "node と .loop の依存が揃っている"
+fi
+
+# --- 2. config 構文 -------------------------------------------------------
+CONFIG_OK=0
+if [ "$RUNTIME_OK" = 0 ]; then
+  emit SKIP "config 構文" "実行環境が整っていないので確認できない"
+elif [ "$CFG_RC" -eq 0 ]; then
+  CONFIG_OK=1
+  emit OK "config 構文" "${LOOP_DIR}/config.toml は妥当"
+else
+  # 読めなかった理由の 1 行目を添える（TOML の行番号がここに出る）。
+  # 複数行を出すと「各行は OK/NG/SKIP で始まる」出力形式の契約が壊れるので
+  # 必ず 1 行に切り詰める
+  emit NG "config 構文" "${LOOP_DIR}/config.toml を読めない。TOML の構文を確認する: $(printf '%s' "$CFG_OUT" | head -1)"
+fi
+
+# --- 3. [project] と extra_tools の対応 ------------------------------------
+# ここが崩れると Verifier がテストを実行せず diff だけでレビューする。
+# 判定は require_project_tools_allowed（実行時ガード、common.sh）と共通の
+# project_tools_check を使う。ここだけ別ロジックにすると「doctor は OK と
+# 言うのに実行時は拒否される」食い違いが起こるため、必ず同じ関数を呼ぶ
+# （provider による適用外判定も同じ関数の中にある。かつては doctor 側だけ
+# その判定を持っておらず、provider = "mock" で doctor が NG・実行時ガードは
+# OK という逆向きの食い違いが起きていた）。
+if [ "$CONFIG_OK" = 0 ]; then
+  # 設定を読めていない以上、test/lint も extra_tools も「未設定」なのか
+  # 「読めなかった」のか区別できない。読めなかった入力から OK を出さない
+  emit SKIP "project/tools 対応" "config を読めないので確認できない"
+else
+  P_TEST="$(cfg project.test 2>/dev/null || echo '')"
+  P_LINT="$(cfg project.lint 2>/dev/null || echo '')"
+  P_PROVIDER="$(cfg agent.provider 2>/dev/null || echo '')"
+  EXTRA_RAW="$("$BIN_DIR/loop-config" get agents.claude.extra_tools 2>/dev/null || echo '')"
+  PT_RESULT="$(project_tools_check "$P_TEST" "$P_LINT" "$EXTRA_RAW" "$P_PROVIDER")"
+  case "$PT_RESULT" in
+    not-applicable)
+      emit SKIP "project/tools 対応" \
+        "agent.provider が claude ではない（${P_PROVIDER}）。ツール許可リストの意味論は provider 固有なので、この検査は適用されない"
+      ;;
+    placeholder)
+      # 「まだ設定していない」を、不足コマンドの列挙ではなく未設定として伝える。
+      # クローン直後はこれが人間の見る最初の画面になるので、テンプレートの
+      # プレースホルダ（echo '...' && false）に含まれる false を名指しして
+      # 「false の許可を足せ」と読める案内を出さない
+      emit NG "project/tools 対応" \
+        "[project] の test / lint がテンプレートの既定値のまま（まだ設定されていない）。ホストで /loop-setup を実行すると、このプロジェクトの test / lint を検出して extra_tools と一緒に .loop/config.toml へ書き込む。テストを持たないプロジェクトなら test / lint を \"\" にする"
+      ;;
+    unneeded)
+      emit OK "project/tools 対応" "test も lint も未設定（ループはテストを実行しない）"
+      ;;
+    ok|"ok "*)
+      PT_FOUND="${PT_RESULT#ok}"
+      PT_FOUND="${PT_FOUND# }"
+      if [ -z "$PT_FOUND" ]; then
+        emit OK "project/tools 対応" "test/lint が使うコマンドは Claude Code の組み込み read-only だけ（追加の許可は不要）"
+      else
+        emit OK "project/tools 対応" "test/lint が使うコマンド（${PT_FOUND}）に対応する Bash 許可がある"
+      fi
+      ;;
+    "ambiguous "*)
+      N_TOOLS="${PT_RESULT#ambiguous }"
+      if [ "$N_TOOLS" -gt 0 ] 2>/dev/null; then
+        emit OK "project/tools 対応" \
+          "extra_tools が ${N_TOOLS} 件（コマンドの形が複雑で内容までは確認できないため件数のみで判定）"
+      else
+        emit NG "project/tools 対応" \
+          "[project] に test/lint があるのに extra_tools が空。Verifier がテストを実行できない"
+      fi
+      ;;
+    "missing "*)
+      PT_MISSING="${PT_RESULT#missing }"
+      # 「extra_tools に足せ」で言い切らない。この検査の視野は extra_tools だけで
+      # tools_<role> を見ておらず、extra_tools は全ロールに効くため、言い切ると
+      # tools_verifier の狭い許可（Bash(git log:*) 等）で足りていた場面でも
+      # Verifier にフルの権限を配らせてしまう。人間が読むのはこの行なので、
+      # 誤警報の可能性と副作用をここに書く（1 行に収めるのは「各行は
+      # OK/NG/SKIP で始まる」という出力形式の契約を守るため）
+      emit NG "project/tools 対応" \
+        "test/lint が使うコマンド（${PT_MISSING}）に対応する Bash 許可が extra_tools に無い。Verifier がテストを実行できない。※この検査は extra_tools だけを見る（.loop/defaults.toml の tools_maker / tools_verifier / tools_fixer は見ない）ので、そこで既に許可されていればこの NG は誤警報。extra_tools への追加は全ロールに効くため、狭い許可で足りるなら広げないこと"
+      ;;
+  esac
+fi
+
+# --- 4. cron 発火時刻 -----------------------------------------------------
+# gen-crontab は「crontab の行を絶対に壊さない」ことを最優先に、異常値を
+# 安全な既定値へ丸めて、何を丸めたかを stderr にだけ知らせる設計になっている。
+# その stderr を捨てると、`firings_per_day = "twelve"` のような設定ミスが
+# 「OK cron 発火時刻: 1 時」として報告される — ユーザーは 12 回/日を頼んだのに
+# 1 回/日で回り続け、コンテナは Up のまま誰も気付かない（設計書が名指しで
+# 挙げている壊れ方そのもの）。警告は必ず表に出し、さらに実際に生成された
+# 時刻の個数を schedule.firings_per_day と突き合わせる。
+if [ "$CONFIG_OK" = 0 ]; then
+  emit SKIP "cron 発火時刻" "config を読めないので確認できない"
+else
+  # stdout（crontab 行）と stderr（警告）をまとめて受け取り、行頭で振り分ける。
+  # crontab 行は必ず "0 " で始まる（分フィールドは常にリテラルの 0）ので、
+  # それ以外の行はすべて警告として扱う（振り分けに迷ったら「警告として
+  # 表に出す」側に倒す。黙って捨てるのがこの検査の失敗モードだから）
+  CRON_OUT="$("$BIN_DIR/gen-crontab" 2>&1)"
+  CRON_LINE="$(printf '%s\n' "$CRON_OUT" | grep '^0 ' | head -1)"
+  CRON_WARN="$(printf '%s\n' "$CRON_OUT" | grep -v '^0 ' | grep -v '^$' | tr '\n' ' ')"
+  CRON_WARN="${CRON_WARN% }"
+  if [ -z "$CRON_LINE" ]; then
+    if [ -n "$CRON_WARN" ]; then
+      emit NG "cron 発火時刻" "gen-crontab が行を出せない: ${CRON_WARN}"
+    else
+      emit NG "cron 発火時刻" "gen-crontab が行を出せない"
+    fi
+  else
+    HOURS_FIELD="$(printf '%s' "$CRON_LINE" | awk '{print $2}')"
+    N_HOURS="$(printf '%s' "$HOURS_FIELD" | awk -F, '{print NF}')"
+    WANT="$(cfg schedule.firings_per_day 2>/dev/null || echo '')"
+    if [ -n "$CRON_WARN" ]; then
+      emit NG "cron 発火時刻" \
+        "実際の発火は ${HOURS_FIELD} 時（${N_HOURS} 回/日）。schedule の設定はそのままでは使えず丸められている: ${CRON_WARN}"
+    elif [ -z "$WANT" ]; then
+      emit SKIP "cron 発火時刻" \
+        "発火は ${HOURS_FIELD} 時（${N_HOURS} 回/日）。schedule.firings_per_day を読めないので設定との突き合わせはできない"
+    elif [ "$N_HOURS" != "$WANT" ]; then
+      emit NG "cron 発火時刻" \
+        "設定は ${WANT} 回/日だが実際は ${N_HOURS} 回/日（${HOURS_FIELD} 時）。24 を割り切る値にする"
+    else
+      emit OK "cron 発火時刻" "${HOURS_FIELD} 時（${N_HOURS} 回/日）"
+    fi
+  fi
+fi
+
+# --- 5. worktree 残骸 -----------------------------------------------------
+# dispatch-verifier が作る検証用 worktree は
+# "$(basename "$REPO_ROOT")-verify-pr-<PR番号>" という名前（REPO_ROOT の
+# 兄弟ディレクトリ）。判定はパス全体ではなく worktree のベース名（末尾の
+# パス要素）に対して行い、かつ "-verify-pr-" の後ろが数字だけであることまで
+# 確認する。パス全体の部分一致で判定すると、リポジトリ自身やその親ディレクトリ
+# の名前に "-verify-pr-" が含まれるだけで（例: リポジトリ名
+# "my-verify-pr-template"）プライマリ worktree 自身を検証用の残骸と誤認し、
+# 健全な状態でも毎回 NG を出し続ける。
+#
+# この検査は config を読まないので、config が壊れていても実行できる
+# （読めない入力から答えを出しているわけではないため SKIP にしない）。
+STALE=""
+while IFS= read -r line; do
+  case "$line" in
+    "worktree "*)
+      WT="${line#worktree }"
+      BASE="${WT##*/}"
+      case "$BASE" in
+        *-verify-pr-*)
+          NUM="${BASE##*-verify-pr-}"
+          case "$NUM" in
+            ''|*[!0-9]*) continue ;;  # 末尾が数字でなければ対象外（誤検知防止）
+          esac
+          KEY="verify-pr-$NUM"
+          OWNER_FILE="$REPO_ROOT/loops/.wt-owner-$KEY"
+          OWNER=""
+          [ -f "$OWNER_FILE" ] && OWNER="$(cat "$OWNER_FILE" 2>/dev/null)"
+          if [ -z "$OWNER" ] || ! kill -0 "$OWNER" 2>/dev/null; then
+            # キー（verify-pr-N）ではなく実パス（$WT）を出す。人間もエージェントも
+            # git worktree remove --force <path> にそのまま渡せるようにするため
+            # （コードレビュー指摘: 以前はキーしか出しておらず、直し方の対応表が
+            # 示す git worktree remove --force <path> を実行するのに、別途
+            # git worktree list でパスを組み立て直す必要があった）
+            STALE="${STALE}${WT}
+"
+          fi
+          ;;
+      esac
+      ;;
+  esac
+done < <(git worktree list --porcelain 2>/dev/null)
+if [ -z "$STALE" ]; then
+  emit OK "worktree 残骸" "なし"
+else
+  # 1 パス 1 行で出す。空白区切りで連結すると、空白を含むパスが混ざった
+  # 瞬間に境界が消え、対応表が案内する
+  # `git worktree remove --force <path>` のコピペが別の worktree を消し得る。
+  # 改行区切りにしつつ「各行は OK/NG/SKIP で始まる」契約も守るため、
+  # 1 件 1 行の NG として出す（件数分 NG が増えるが、どれも実際の問題）
+  while IFS= read -r WT; do
+    [ -n "$WT" ] || continue
+    emit NG "worktree 残骸" "所有者のいない検証用 worktree: ${WT}（git worktree remove --force '${WT}' で片付ける。その PR の検証は止まる）"
+  done <<< "$STALE"
+fi
+
+# --- 6. コンテナ稼働 ------------------------------------------------------
+CONTAINER_UP=0
+PS_JSON="$("${COMPOSE[@]}" ps --format json 2>/dev/null)"
+# JSON 全体から 'running' を素朴に grep すると、State ではないフィールド
+# （Name はリポジトリのディレクトリ名から作られる）に "running" が含まれる
+# だけで OK になる。クラッシュを繰り返しているコンテナを「稼働中」と
+# 報告しないよう、State フィールドの値そのものに当てる
+if printf '%s' "$PS_JSON" | grep -qE '"State"[[:space:]]*:[[:space:]]*"running"'; then
+  CONTAINER_UP=1
+  emit OK "コンテナ稼働" "loop サービスが running"
+else
+  emit NG "コンテナ稼働" "loop サービスが動いていない。docker compose -f docker/compose.yml up -d"
+fi
+
+# --- 7/8/9/10. コンテナの中を見る検査 ---------------------------------------
+if [ "$CONTAINER_UP" = 0 ]; then
+  emit SKIP "claude CLI" "コンテナが動いていないので確認できない"
+  emit SKIP "claude 認証" "コンテナが動いていないので確認できない"
+  emit SKIP "gh 認証" "コンテナが動いていないので確認できない"
+  emit SKIP "ラベル" "コンテナが動いていないので確認できない"
+else
+  # claude は「バイナリが起動できるか」しか非対話では確かめられない。
+  # `claude --version` は認証が切れていても 0 で終わるので、これを
+  # 「認証 OK」と報告してはいけない（gh の `gh auth status` に相当する
+  # 認証確認のサブコマンドは claude には無く、実際に確かめるには
+  # モデル呼び出しを 1 回投げるしかない。それは毎朝の /loop-mtg で
+  # トークンを消費し、かつネットワーク障害を「認証切れ」と誤診する）。
+  # 検査名を実際に確かめたこと（CLI が起動する）に合わせ、認証は
+  # 確認できないと明言する
+  if "${COMPOSE[@]}" exec -T loop claude --version >/dev/null 2>&1; then
+    emit OK "claude CLI" "コンテナ内で起動できる"
+  else
+    emit NG "claude CLI" "コンテナ内の claude が起動できない。docker compose -f docker/compose.yml exec loop claude"
+  fi
+  emit SKIP "claude 認証" "非対話では確認できない（claude --version は認証が切れていても成功する）。docker compose -f docker/compose.yml exec loop claude を手で開いて確かめる"
+
+  GH_OK=0
+  if "${COMPOSE[@]}" exec -T loop gh auth status >/dev/null 2>&1; then
+    GH_OK=1
+    emit OK "gh 認証" "コンテナ内で認証済み"
+  else
+    emit NG "gh 認証" "コンテナ内の gh が未認証。docker compose -f docker/compose.yml exec loop gh auth login"
+  fi
+
+  if [ "$GH_OK" = 0 ]; then
+    emit SKIP "ラベル" "gh が未認証なので確認できない"
+  else
+    LABELS="$("${COMPOSE[@]}" exec -T loop gh label list --json name 2>/dev/null)"
+    MISSING=""
+    for L in loop:ready needs-human loop:auto-merge; do
+      printf '%s' "$LABELS" | grep -q "\"$L\"" || MISSING="$MISSING $L"
+    done
+    if [ -z "$MISSING" ]; then
+      emit OK "ラベル" "3 つとも存在する"
+    else
+      emit NG "ラベル" "不足:${MISSING}（キューもエスカレーションも黙って機能しない）"
+    fi
+  fi
+fi
+
+[ "$FAILED" -eq 0 ] && exit 0
+exit 1
