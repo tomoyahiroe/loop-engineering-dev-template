@@ -26,6 +26,26 @@ record_state() {
   printf -- '- %s: %s\n' "$(date +%Y-%m-%d)" "$1" >> "$REPO_ROOT/loops/STATE.md"
 }
 
+# loops/events.jsonl に 1 行追記する。$1 = kind、$2 以降 = "k=v"
+#
+# record_state（人間が MTG で読む散文）とは宛先も用途も別。こちらは
+# コントロールプレーンが読む機械向けの記録で、時刻と構造を持つ。
+# 両方に書く経路と、こちらにしか書かない経路（idle / gate_retry）がある。
+#
+# JSON の組み立てとタイムスタンプは node 側でやる。bash で JSON を組むと
+# gate_out の複数行出力と引用符で壊れ、date -Is は GNU 拡張で BSD date
+# （macOS。bats はホストで走る）にないため。
+#
+# 観測のためのログなので、書き込み失敗でループ本体を止めない。
+# ただし未知の kind（配線ミス）は events-cli.mjs 側が終了コード 2 で落とす
+record_event() {
+  local kind="$1"; shift
+  local args=() kv
+  for kv in "$@"; do args+=(--field "$kv"); done
+  REPO_ROOT="$REPO_ROOT" node "$LIB_DIR/events-cli.mjs" append \
+    --kind "$kind" "${args[@]+"${args[@]}"}" 2>/dev/null || true
+}
+
 # 一過性エラー（DNS/接続系）の判定。$1 = 実行ログのパス
 is_transient_error() {
   [ -f "$1" ] || return 1

@@ -1,4 +1,7 @@
 node_modules/
+# コントロールプレーンが読む運用ログ。2 時間ごとに増えるので、
+# コミットに乗せると Maker の PR が無関係な差分で汚れる
+loops/events.jsonl
 loops/.preview.pid
 loops/.preview.meta
 loops/runs/*.log

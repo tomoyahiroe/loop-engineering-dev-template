@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # スケジュール発火の唯一の入口。cron から呼ばれる。
-# 何もすることがなければ何も記録せず終了する（空回りゼロ）。
+# 何もすることがなければ人間向けの STATE.md には何も書かない（空回りゼロ）。
+# 一方 loops/events.jsonl には毎 tick 必ず 1 行残す（idle も含む）。
+# 観測 UI に「理由の書かれていない空白」を作らないため（設計書の決定 2）。
+# --dry-run はどちらにも書かない。
 # 用法: firing [--dry-run]
 set -uo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
@@ -23,6 +26,7 @@ if [ "$DRY" = 0 ] && [ "${LOOP_SKIP_FETCH:-0}" != "1" ]; then
     if ! git merge --no-edit origin/main >/dev/null 2>&1; then
       git merge --abort >/dev/null 2>&1 || true
       record_state "firing 中止: origin/main とのコンフリクト"
+      record_event conflict
       exit 1
     fi
   fi
@@ -82,6 +86,7 @@ if [ "$DRY" = 0 ] && [ "$MATURITY" != "L1" ] && [ "$AUTO_FIX_ROUNDS" -gt 0 ] 2>/
       FXMARKER="loops/.fix-exhausted-$FPR"
       if [ ! -f "$FXMARKER" ]; then
         record_state "pr-$FPR 自動修正の上限 ($DONE_ROUNDS/$AUTO_FIX_ROUNDS) — needs-human"
+        record_event fix_exhausted "pr=$FPR" "issue=$FISSUE" "round=$DONE_ROUNDS"
         gh issue edit "$FISSUE" --add-label needs-human >/dev/null 2>&1 || true
         touch "$FXMARKER" 2>/dev/null || true
       fi
@@ -93,6 +98,7 @@ if [ "$DRY" = 0 ] && [ "$MATURITY" != "L1" ] && [ "$AUTO_FIX_ROUNDS" -gt 0 ] 2>/
     rm -f "loops/.fix-exhausted-$FPR" 2>/dev/null || true
     NEXT_ROUND=$((DONE_ROUNDS + 1))
     echo "firing: dispatching fixer for PR #$FPR (round $NEXT_ROUND)"
+    record_event fix "pr=$FPR" "issue=$FISSUE" "round=$NEXT_ROUND"
     "$BIN_DIR/dispatch-fixer" "$FPR" "$FISSUE" "$NEXT_ROUND" || true
   done < <(printf '%s' "$PR_JSON" | node "$LIB_DIR/pr-triage.mjs" --mode needs-fix)
 fi
@@ -122,6 +128,7 @@ if [ "$DRY" = 0 ] && [ "$MATURITY" = "L3" ]; then
     MMARKER="loops/.merge-failed-$MPR"
     if gh pr merge "$MPR" --squash --delete-branch >/dev/null 2>&1; then
       record_state "L3 自動 merge: PR #$MPR (issue #$MISSUE)"
+      record_event automerge "pr=$MPR" "issue=$MISSUE"
       echo "firing: auto-merged PR #$MPR"
       # 過去に失敗記録が残っていても、成功した以上もう有効ではない
       rm -f "$MMARKER" 2>/dev/null || true
@@ -131,6 +138,7 @@ if [ "$DRY" = 0 ] && [ "$MATURITY" = "L3" ]; then
       :
     else
       record_state "L3 自動 merge に失敗: PR #$MPR — needs-human"
+      record_event automerge_failed "pr=$MPR" "issue=$MISSUE"
       gh issue edit "$MISSUE" --add-label needs-human >/dev/null 2>&1 || true
       touch "$MMARKER" 2>/dev/null || true
     fi
@@ -139,7 +147,13 @@ fi
 
 # --- 3. 何もすることがなければ静かに終わる ---------------------------------
 if [ -z "$NEXT_ISSUE" ]; then
-  [ "$DRY" = 1 ] && echo "DRY RUN: ready な Issue なし（何もしない）"
+  if [ "$DRY" = 1 ]; then
+    echo "DRY RUN: ready な Issue なし（何もしない）"
+  else
+    # STATE.md には書かない（人間向けの一次情報を「何もなかった」で
+    # 埋めない、という既存の方針は変えない）。機械向けのログにだけ残す
+    record_event idle "open_prs=$N_OPEN" "today=$N_TODAY"
+  fi
   exit 0
 fi
 
@@ -147,12 +161,16 @@ fi
 if [ "$N_OPEN" -ge "$MAX_PRS" ]; then
   MSG="dispatch スキップ #$NEXT_ISSUE (open PR 上限 $N_OPEN/$MAX_PRS)"
   [ "$DRY" = 1 ] && { echo "DRY RUN: $MSG"; exit 0; }
-  record_state "$MSG"; exit 0
+  record_state "$MSG"
+  record_event skip "reason=open_prs" "issue=$NEXT_ISSUE" "open_prs=$N_OPEN" "max_prs=$MAX_PRS"
+  exit 0
 fi
 if [ "$N_TODAY" -ge "$MAXD" ]; then
   MSG="dispatch スキップ #$NEXT_ISSUE (本日の日次上限 $N_TODAY/$MAXD)"
   [ "$DRY" = 1 ] && { echo "DRY RUN: $MSG"; exit 0; }
-  record_state "$MSG"; exit 0
+  record_state "$MSG"
+  record_event skip "reason=daily" "issue=$NEXT_ISSUE" "today=$N_TODAY" "max_today=$MAXD"
+  exit 0
 fi
 
 GATE_RC=0
@@ -160,7 +178,9 @@ GATE_OUT="$("$BIN_DIR/budget-check")" || GATE_RC=$?
 if [ "$GATE_RC" -ne 0 ]; then
   MSG="dispatch スキップ #$NEXT_ISSUE (予算: $(echo "$GATE_OUT" | grep '^SKIP' | head -1))"
   [ "$DRY" = 1 ] && { echo "DRY RUN: $MSG"; exit 0; }
-  record_state "$MSG"; exit 0
+  record_state "$MSG"
+  record_event skip "reason=budget" "issue=$NEXT_ISSUE" "msg=$GATE_OUT"
+  exit 0
 fi
 
 # --- 5. gate 再検証（Issue は MTG 後に編集されうる） ------------------------
@@ -191,6 +211,9 @@ let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
     # 同じ理由で既に remediate 済み（コメント投稿・STATE 記録まで成功
     # 済み）。ここで再びやることは、loop:ready の除去（唯一の自己修復
     # 手段）のリトライだけ。コメント・STATE 記録は増やさず静かに終わる
+    # （events.jsonl には別 kind で残す。STATE を汚さずに「この tick で何が
+    #   起きたか」を観測できるようにするのが gate_retry を分けた理由）
+    record_event gate_retry "issue=$NEXT_ISSUE"
     gh issue edit "$NEXT_ISSUE" --remove-label loop:ready >/dev/null 2>&1 || true
     exit 0
   fi
@@ -218,6 +241,7 @@ $GOUT
     printf '%s: %s\n' "$(date +%Y-%m-%d)" "$MSG"
   } > "$MARKER"
   record_state "$MSG"
+  record_event gate_failed "issue=$NEXT_ISSUE" "gate_out=$GOUT"
   # リトライを止める操作は最後。ここまでの 3 手（コメント・付与・マーカー
   # +STATE）は成功済みなので、これが失敗しても次 tick はマーカー一致で
   # 「除去だけ再試行」の自己修復経路に入り、コメント・STATE は増えない
@@ -235,7 +259,10 @@ fi
 if [ "$MATURITY" = "L1" ]; then
   MSG="L1 (報告のみ): 今なら #$NEXT_ISSUE を dispatch する"
   [ "$DRY" = 1 ] && { echo "DRY RUN: $MSG"; exit 0; }
-  record_state "$MSG"; exit 0
+  record_state "$MSG"
+  record_event report "issue=$NEXT_ISSUE" "maturity=$MATURITY" \
+    "open_prs=$N_OPEN" "max_prs=$MAX_PRS" "today=$N_TODAY" "max_today=$MAXD"
+  exit 0
 fi
 
 if [ "$DRY" = 1 ]; then
@@ -245,5 +272,7 @@ fi
 
 # --- 7. Maker → Verifier ---------------------------------------------------
 echo "firing: dispatching maker for issue #$NEXT_ISSUE"
+record_event dispatch "issue=$NEXT_ISSUE" "maturity=$MATURITY" \
+  "open_prs=$N_OPEN" "max_prs=$MAX_PRS" "today=$N_TODAY" "max_today=$MAXD"
 "$BIN_DIR/dispatch-maker" "$NEXT_ISSUE" || echo "maker dispatch 失敗（loops/runs/ を確認）"
 exit 0

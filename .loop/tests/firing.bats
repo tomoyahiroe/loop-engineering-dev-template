@@ -39,11 +39,28 @@ teardown() {
 # gate を通る Issue 本文（本文中の \n は JSON エスケープ。実際の改行ではない）
 GOOD_ISSUE_JSON='{"body":"## 背景\nx\n\n## 受け入れ基準\n- [ ] `pnpm test`\n\n## 実装方針\n`a.txt` を編集\n\n## スコープ外\nなし\n\n## 依存\nなし\n","state":"OPEN"}'
 
-@test "ready な Issue がなければ何も記録せず 0 で終わる" {
+@test "ready な Issue がなければ STATE には書かず、events に idle を残す" {
+  # 人間向けの STATE.md は「何もなかった」で埋めない（空回りゼロ）。
+  # 一方 events.jsonl には残す。観測 UI に理由の書かれていない空白を
+  # 作らないため（P3 設計書の決定 2）
   GH_ISSUE_LIST_JSON='[]' run "$LOOP_REAL_DIR/bin/firing"
   [ "$status" -eq 0 ]
   run wc -l < "$REPO_ROOT/loops/STATE.md"
   [ "$output" -eq 1 ]
+  run cat "$REPO_ROOT/loops/events.jsonl"
+  [[ "$output" == *'"kind":"idle"'* ]]
+}
+
+@test "--dry-run は events.jsonl にも書かない" {
+  # DRY は「何が起きるかを見る」ためのもの。履歴を汚してはいけない
+  GH_ISSUE_LIST_JSON='[]' run "$LOOP_REAL_DIR/bin/firing" --dry-run
+  [ "$status" -eq 0 ]
+  [ ! -f "$REPO_ROOT/loops/events.jsonl" ]
+
+  GH_ISSUE_LIST_JSON='[{"number":5}]' GH_ISSUE_JSON="$GOOD_ISSUE_JSON" \
+    run "$LOOP_REAL_DIR/bin/firing" --dry-run
+  [ "$status" -eq 0 ]
+  [ ! -f "$REPO_ROOT/loops/events.jsonl" ]
 }
 
 @test "--dry-run は判定だけ出して副作用を起こさない" {
@@ -68,6 +85,23 @@ GOOD_ISSUE_JSON='{"body":"## 背景\nx\n\n## 受け入れ基準\n- [ ] `pnpm tes
   run tail -2 "$REPO_ROOT/loops/STATE.md"
   [[ "$output" == *"L1"* ]]
   [[ "$output" == *"#5"* ]]
+}
+
+@test "L1 の tick は STATE と events の両方に残る（record_state を置き換えない）" {
+  # events.jsonl は record_state の代替ではない。人間向けの散文と
+  # 機械向けの構造化ログは宛先も用途も別（設計書の決定 3）
+  printf 'maturity = "L1"\n[agent]\nprovider = "mock"\n' > "$LOOP_DIR/config.toml"
+  GH_ISSUE_LIST_JSON='[{"number":5}]' GH_ISSUE_JSON="$GOOD_ISSUE_JSON" \
+    run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+
+  run tail -1 "$REPO_ROOT/loops/STATE.md"
+  [[ "$output" == *"L1"* ]]
+
+  run cat "$REPO_ROOT/loops/events.jsonl"
+  [[ "$output" == *'"kind":"report"'* ]]
+  [[ "$output" == *'"issue":5'* ]]
+  [[ "$output" == *'"maturity":"L1"'* ]]
 }
 
 @test "open PR が上限に達していればスキップを記録する" {
