@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# コントロールプレーン（観測 UI）を起動する。読み取り専用で 127.0.0.1 のみ。
+# 用法: control-plane [--port N]
+#   ポートを省略すると設定の [ui] port（既定 7717）を使う
+set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
+exec node "$LIB_DIR/control-plane-cli.mjs" "$@"

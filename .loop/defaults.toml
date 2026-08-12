@@ -45,6 +45,22 @@ auto_merge_label = "loop:auto-merge"
 # 一過性エラー（DNS/接続系）を検知したときのリトライ待ち秒数
 delay_seconds = 600
 
+[ui]
+# コントロールプレーン（観測 UI）。読み取り専用で、状態を変える経路を持たない。
+#
+# 必ず 127.0.0.1 にだけ bind する（サーバ側で固定していて設定では変えられない）。
+# docker/compose.yml が network_mode: host のため、0.0.0.0 だと同一 LAN の
+# 全員に Issue タイトルとトークン消費量が見えてしまう
+port = 7717
+# ブラウザ側のポーリング間隔（秒）
+poll_seconds = 10
+# gh 呼び出しの結果を使い回す秒数。ポーリングのたびに叩くと体感が遅く、
+# GitHub のレート制限も無駄に減る
+cache_seconds = 30
+# 子プロセス（gh / budget-check など）を打ち切るまでの秒数。
+# gh がハングしたときに UI ごと固まるのを防ぐ
+command_timeout_seconds = 20
+
 [gate]
 required_sections = ["## 背景", "## 受け入れ基準", "## 実装方針", "## スコープ外", "## 依存"]
 max_files_touched = 8
