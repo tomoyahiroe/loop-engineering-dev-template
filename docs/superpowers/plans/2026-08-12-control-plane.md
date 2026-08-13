@@ -441,27 +441,45 @@ API が応答しないときの経路では、本日の dispatch 数・予算・
 
 ---
 
-## Task 7: akashic-recorder への展開確認
+## Task 7: akashic-recorder への展開確認 — **完了（2026-08-13）**
 
-P5（同期）はまだないので手動コピーで検証する。**受け入れ基準の
-「template 所有ファイルのコピーだけで入る」を実地で確認するのが目的。**
+実地で確認した結果:
 
-```bash
-cd ~/code_box/projects/akashic-recorder
-D=~/code_box/projects/loop-template/dev-loop
-cp -R "$D/.loop"/{bin,lib,web,defaults.toml} .loop/
-cp -R "$D/.claude/skills" .claude/
-cp "$D/docker/entrypoint.sh" docker/
-# config.toml / Dockerfile / settings.json / CLAUDE.md には触れない
-git -C . diff --stat -- docker/Dockerfile .loop/config.toml .claude/settings.json CLAUDE.md
-#   ↑ 出力が空であること
-docker compose -f docker/compose.yml up -d --force-recreate loop
-```
+| 受け入れ基準 | 結果 |
+|---|---|
+| seeded 4 ファイルの差分が 0 | ✅ `Dockerfile` / `config.toml` / `settings.json` / `CLAUDE.md` すべて無変更 |
+| `config.toml` を編集せずに UI が上がる | ✅ `[ui]` は `config.toml` に無く、`loop-config get ui.port` は `defaults.toml` から 7717 を返した |
+| ユーザーの設定が保たれる | ✅ `maturity = "L2"`、`npm run test/lint`、`extra_tools` すべて温存 |
+| ホストのブラウザから見える | ✅ 実データを表示（budget 0/360M、次の firing 13:00、Issue #3） |
+| LAN からは見えない | ✅ |
+| ループ本体が無傷 | ✅ supercronic と control-plane が並走 |
 
-`.loop/config.toml` を手で編集せずに UI が立ち上がること（`[ui]` が
-`defaults.toml` から読まれること）を確認する。
+### 手順の欠陥（実地で判明・README に反映済み）
 
----
+**`--force-recreate` では足りない。`--build` が要る。**
+
+`docker/entrypoint.sh` は Dockerfile の `COPY` でイメージに焼き込まれる
+（`docker/Dockerfile:45`）。ホスト側のファイルを差し替えて
+`up -d --force-recreate` しても、既存イメージからコンテナを作り直すだけなので
+**古い entrypoint のまま静かに起動する**。コンテナは正常に Up のままで、
+UI だけが上がらない。実際にこれを踏み、ログに起動行も警告行も出ないことから
+気づいた。
+
+`.loop/**` と `docker/compose.yml` はマウントされるので再ビルド不要。
+**焼き込まれるのは entrypoint.sh だけ**という非対称性が罠になっている。
+P5（テンプレート同期）を作るときは、`docker/entrypoint.sh` が変わった場合に
+再ビルドを促す必要がある。
+
+### コピー対象について
+
+計画では `{bin,lib,web,defaults.toml}` だけを挙げていたが、**`tests` も
+含める必要がある**。`bin/firing` を新しくして `tests/firing.bats` を古いまま
+にすると、変更した firing に対して古いテストが落ちる。テンプレート所有
+（`.loop/**`）は原則まとめて更新する。
+
+なお派生プロジェクトの `.loop/node_modules` は `npm ci --omit=dev` で入るため
+bats（devDependency）が無く、そちらでテストは走らない。派生側はハーネスを
+**動かす**側で、テストはテンプレート側で回す、という分担で正しい。
 
 ## 検証手順（end-to-end）
 

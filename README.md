@@ -98,6 +98,39 @@ cat "$D/.gitignore" >> .gitignore     # 既存の .gitignore に追記する
 同名ファイルがあれば潰します。既存のものがある場合は、コピー前に退避するか
 手で統合してください。
 
+## 導入済みのプロジェクトでハーネスを更新する
+
+テンプレート側で機能が増えたときは、**テンプレート所有のファイルだけ**を
+上書きします（境界は `.loop/OWNERSHIP.toml`）。
+
+```bash
+cd <あなたのプロジェクト>
+D=<dev-loop をクローンした場所>
+for i in agents bin lib prompts skills tests web defaults.toml \
+         OWNERSHIP.toml VERSION package.json package-lock.json; do
+  [ -e "$D/.loop/$i" ] && cp -R "$D/.loop/$i" .loop/
+done
+cp -R "$D/.claude/skills" .claude/
+cp "$D/docker/compose.yml" "$D/docker/entrypoint.sh" docker/
+
+# ★ --build が必要（--force-recreate だけでは足りない）
+docker compose -f docker/compose.yml up -d --build loop
+```
+
+`.loop/config.toml`・`docker/Dockerfile`・`.claude/settings.json`・`CLAUDE.md`
+は **seeded** なので触りません。あなたが書いた設定はそのまま残り、新しく
+増えた設定キーは `defaults.toml` 側から自動的に効きます。
+
+**`--build` を忘れないでください。** `docker/entrypoint.sh` は Dockerfile の
+`COPY` でイメージに焼き込まれるため、ホスト側のファイルを差し替えただけでは
+コンテナに反映されません。`--force-recreate` は既存イメージからコンテナを
+作り直すだけなので、**古い entrypoint のまま静かに起動します**
+（新機能が動かないのに、コンテナは正常に Up のまま）。
+
+`.loop/**` と `docker/compose.yml` はホストからマウントされるので、こちらは
+再ビルドなしで反映されます。反映されたかどうかは `/loop-doctor` か、
+`docker logs <コンテナ名>` の起動ログで確認してください。
+
 あとは通常どおりです。
 
 ```
