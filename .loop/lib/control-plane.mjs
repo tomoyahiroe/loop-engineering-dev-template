@@ -70,6 +70,34 @@ export function safeJoin(baseDir, name) {
   return full;
 }
 
+const pad2 = (n) => String(n).padStart(2, '0');
+
+// firing の $DATE と同じ「ローカルの今日」。
+// toISOString() は UTC なので、JST では午前 9 時前に日付が 1 日ずれる
+// （08-13 08:00 JST = 08-12 23:00 UTC）。firing は date +%Y-%m-%d を使う
+export function localDate(now = new Date()) {
+  return `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+}
+
+// 本日の dispatch 数。**firing の N_TODAY と同じものを数える。**
+//
+//   firing: ls "loops/runs/$DATE"-maker-issue-*.md | grep -v '\.retry\.md$' | wc -l
+//
+// ここがズレると、画面の「本日 dispatch X / N」が firing が実際に使う上限
+// 判定と食い違う。P1 で /loop-status が起こしたのと同じ事故（.retry.md を
+// 数えてしまい 3 対 2 の食い違い）なので、tests で式そのものを照合している。
+//
+// events の dispatch を数える実装にしてはいけない。dispatch イベントは
+// dispatch-maker を呼ぶ直前に記録されるため、ツール許可ガードで
+// dispatch-maker が起動を拒否した場合にイベントだけが残り、firing の
+// 数え方と食い違う
+export function countDispatchedToday(filenames, date) {
+  const prefix = `${date}-maker-issue-`;
+  return (Array.isArray(filenames) ? filenames : []).filter(
+    (f) => f.startsWith(prefix) && f.endsWith('.md') && !f.endsWith('.retry.md'),
+  ).length;
+}
+
 const labelNames = (issue) => (issue?.labels ?? [])
   .map((l) => (typeof l === 'string' ? l : l?.name))
   .filter(Boolean);

@@ -244,6 +244,45 @@ code() { curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "$@"; }
   [ "$output" = "404" ]
 }
 
+@test "本日 dispatch の数え方が firing の N_TODAY と一致する" {
+  # P1 で /loop-status が起こしたのと同じ事故を、今度は API 側で起こさない
+  # ための照合。firing は .retry.md を除外して数えるので、除外しない実装に
+  # すると画面の「本日 dispatch X / N」が firing の上限判定と食い違う。
+  # 実データで突き合わせる（式の文字列比較ではなく振る舞いで見る）
+  local d
+  d="$(date +%Y-%m-%d)"
+  : > "$REPO_ROOT/loops/runs/$d-maker-issue-1.md"
+  : > "$REPO_ROOT/loops/runs/$d-maker-issue-1.retry.md"   # 数えてはいけない
+  : > "$REPO_ROOT/loops/runs/$d-maker-issue-2.md"
+  : > "$REPO_ROOT/loops/runs/$d-verifier-pr-3.md"          # maker ではない
+  : > "$REPO_ROOT/loops/runs/2020-01-01-maker-issue-9.md"  # 今日ではない
+
+  # firing 自身に数えさせた値を正とする
+  local want
+  want="$(cd "$REPO_ROOT" && ls "loops/runs/$d"-maker-issue-*.md 2>/dev/null \
+          | grep -v '\.retry\.md$' | wc -l | tr -d ' ')"
+  [ "$want" -eq 2 ] || { echo "前提が壊れている: firing 式の結果が $want"; false; }
+
+  start_server
+  run get /api/status
+  [[ "$output" == *"\"dispatched_today\":$want"* ]] \
+    || { echo "API の dispatched_today が firing の $want と一致しない: $output"; false; }
+}
+
+@test "本日の判定に UTC ではなくローカル日付を使う" {
+  # toISOString() は UTC。JST では午前 9 時前に日付が 1 日ずれ、
+  # 毎朝「本日 dispatch 0」と表示されてしまう
+  run grep -c "toISOString().slice(0, 10)" "$LOOP_REAL_DIR/lib/control-plane-cli.mjs"
+  [ "$output" -eq 0 ]
+  run node -e '
+    import(process.argv[1]).then((m) => {
+      // ローカル 2026-08-13 08:00 は UTC では 08-12。ローカル側を返すこと
+      const d = new Date(2026, 7, 13, 8, 0, 0);
+      process.stdout.write(m.localDate(d));
+    })' "$LOOP_REAL_DIR/lib/control-plane.mjs"
+  [ "$output" = "2026-08-13" ]
+}
+
 @test "画面の kind 表示名が events.mjs の KINDS を網羅している" {
   # 網羅が崩れても画面は生の kind を出すだけで壊れないが、
   # 日本語の表示名が付かないまま気づかれない状態が続く。
@@ -260,6 +299,22 @@ code() { curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "$@"; }
 
   missing="$(comm -23 <(echo "$known") <(echo "$ui"))"
   [ -z "$missing" ] || { echo "画面に表示名がない kind: $missing"; false; }
+}
+
+@test "/loop-status が叩く API のパスがサーバに実在する" {
+  # スキル（散文）が存在しないエンドポイントを案内していても、実際に
+  # /loop-status を実行するまで誰も気づかない
+  local skill used p
+  skill="$(cd "$LOOP_REAL_DIR/.." && pwd)/.claude/skills/loop-status/SKILL.md"
+  [ -f "$skill" ] || skip "loop-status スキルが無い"
+
+  used="$(grep -oE '/api/[a-z]+' "$skill" | sort -u)"
+  [ -n "$used" ] || { echo "SKILL.md から API パスを抽出できない"; false; }
+  while read -r p; do
+    [ -n "$p" ] || continue
+    grep -q "p === '$p'" "$LOOP_REAL_DIR/lib/control-plane-cli.mjs" \
+      || { echo "/loop-status が案内する $p がサーバに無い"; false; }
+  done <<< "$used"
 }
 
 @test "画面が読む API のパスがすべてサーバに実在する" {

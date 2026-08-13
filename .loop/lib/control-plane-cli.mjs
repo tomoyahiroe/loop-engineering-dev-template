@@ -13,13 +13,14 @@
 
 import { createServer } from 'node:http';
 import { execFile } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { dirname, resolve, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, getKey } from './config.mjs';
 import {
   parseCrontabHours, nextFiring, parseBudget,
   safeJoin, classifyIssues, summarizePrs,
+  localDate, countDispatchedToday,
 } from './control-plane.mjs';
 import { tail } from './events.mjs';
 
@@ -143,11 +144,15 @@ async function apiStatus() {
     ? classifyIssues(issues.data, READY_LABEL).ready.length
     : null;
 
-  const today = new Date().toISOString().slice(0, 10);
-  const events = tail(await readText(EVENTS_PATH), 500);
-  const dispatchedToday = events
-    .filter((e) => e.kind === 'dispatch' && String(e.ts ?? '').startsWith(today))
-    .length;
+  // firing が上限判定に使う数え方に合わせる（loops/runs のファイルを数える）。
+  // events の dispatch を数えると、dispatch-maker が起動を拒否された tick で
+  // 食い違う。詳細は control-plane.mjs の countDispatchedToday を見る
+  let dispatchedToday = 0;
+  try {
+    dispatchedToday = countDispatchedToday(await readdir(RUNS_DIR), localDate());
+  } catch {
+    // loops/runs がまだ無い（セットアップ直後）は 0 でよい
+  }
 
   return {
     maturity: getKey(cfg, 'maturity') ?? null,
