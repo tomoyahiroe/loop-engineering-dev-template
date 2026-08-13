@@ -45,6 +45,25 @@ auto_merge_label = "loop:auto-merge"
 # 一過性エラー（DNS/接続系）を検知したときのリトライ待ち秒数
 delay_seconds = 600
 
+[docker]
+# compose のプロジェクト名。コンテナ名・イメージ名・ネットワーク名の接頭辞に
+# なる。
+#
+# **同じホストで複数のループを動かすなら、必ず一意にすること。**
+# docker/compose.yml は docker/ の中にあるため、compose の既定の
+# プロジェクト名はどのリポジトリでも "docker" になる。そのまま 2 つ目の
+# ループを起動すると、コンテナ名 (docker-loop-1) が衝突し、**2 つ目の
+# up が 1 つ目のコンテナを別リポジトリ向けに作り直す**（1 つ目のループが
+# 黙って止まる）。
+#
+# 空にしておくとリポジトリのディレクトリ名から自動で決める。
+# 明示したい場合だけ config.toml に書く。
+#
+# この値は .loop/bin/compose-env が docker/.env に書き出し、compose が
+# そこから読む。config.toml を変えたら compose-env を実行し直すこと
+# （ズレていれば /loop-doctor が知らせる）
+project_name = ""
+
 [ui]
 # コントロールプレーン（観測 UI）。読み取り専用で、状態を変える経路を持たない。
 #

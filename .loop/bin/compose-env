@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# docker/.env に COMPOSE_PROJECT_NAME を書き出す。
+#
+# なぜ必要か: docker/compose.yml は docker/ の中にあるため、compose の既定の
+# プロジェクト名はどのリポジトリでも "docker" になる。そのまま複数のループを
+# 同じホストで動かすと、コンテナ名 (docker-loop-1) ・イメージ名・ポートを
+# 互いに奪い合い、2 つ目の up が 1 つ目のコンテナを別リポジトリ向けに
+# 作り直す（1 つ目のループが黙って止まる）。
+#
+# compose は -f で渡したファイルのあるディレクトリの .env を読む
+# （リポジトリルートの .env は読まない）。そこに書いておけば、
+# `docker compose -f docker/compose.yml up -d` のような素の呼び出しでも
+# -p を付けずに効く。
+#
+# 用法: compose-env [--print]
+#   --print  書き出さずに解決した名前だけ表示する
+set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
+
+NAME="$(compose_project_name)" || exit 1
+[ -n "$NAME" ] || { echo "プロジェクト名を決められません" >&2; exit 1; }
+
+if [ "${1:-}" = "--print" ]; then
+  printf '%s\n' "$NAME"
+  exit 0
+fi
+
+ENV_FILE="$REPO_ROOT/docker/.env"
+[ -d "$REPO_ROOT/docker" ] || {
+  echo "$REPO_ROOT/docker がありません" >&2
+  exit 1
+}
+
+# 既に同じ内容なら触らない（mtime を動かすと不要な再ビルド判定を誘発する）
+if [ -f "$ENV_FILE" ] && grep -qx "COMPOSE_PROJECT_NAME=$NAME" "$ENV_FILE"; then
+  echo "docker/.env は既に $NAME になっています"
+  exit 0
+fi
+
+{
+  echo "# .loop/bin/compose-env が生成。直接編集せず .loop/config.toml の"
+  echo "# [docker] project_name を変えてから compose-env を実行し直すこと。"
+  echo "COMPOSE_PROJECT_NAME=$NAME"
+} > "$ENV_FILE"
+
+echo "docker/.env に COMPOSE_PROJECT_NAME=$NAME を書きました"
+echo "反映するには一度 down してから up し直してください:"
+echo "  docker compose -f docker/compose.yml up -d"

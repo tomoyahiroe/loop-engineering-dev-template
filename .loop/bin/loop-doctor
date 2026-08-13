@@ -228,6 +228,31 @@ else
   done <<< "$STALE"
 fi
 
+# --- 5.5 compose プロジェクト名 -------------------------------------------
+# docker/compose.yml が docker/ の中にあるため、compose の既定のプロジェクト名は
+# どのリポジトリでも "docker" になる。そのまま複数のループを同じホストで動かすと
+# コンテナ名が衝突し、2 つ目の up が 1 つ目のコンテナを別リポジトリ向けに
+# 作り直す（1 つ目のループが黙って止まる）。この壊れ方は、止まった側からは
+# 「いつのまにか動いていない」としか見えないので、必ず検査する
+if [ "$CONFIG_OK" = 0 ]; then
+  emit SKIP "compose プロジェクト名" "config を読めないので確認できない"
+else
+  WANT_PROJECT="$(compose_project_name)"
+  ENV_FILE="$REPO_ROOT/docker/.env"
+  HAVE_PROJECT=""
+  [ -f "$ENV_FILE" ] && HAVE_PROJECT="$(grep -E '^COMPOSE_PROJECT_NAME=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)"
+
+  if [ -z "$HAVE_PROJECT" ]; then
+    emit NG "compose プロジェクト名" \
+      "docker/.env が無いためプロジェクト名が \"docker\" になり、他のリポジトリのループとコンテナ名が衝突する。.loop/bin/compose-env を実行する"
+  elif [ "$HAVE_PROJECT" != "$WANT_PROJECT" ]; then
+    emit NG "compose プロジェクト名" \
+      "docker/.env は \"$HAVE_PROJECT\" だが設定からは \"$WANT_PROJECT\" になる。.loop/bin/compose-env を実行し直す"
+  else
+    emit OK "compose プロジェクト名" "$HAVE_PROJECT"
+  fi
+fi
+
 # --- 6. コンテナ稼働 ------------------------------------------------------
 CONTAINER_UP=0
 PS_JSON="$("${COMPOSE[@]}" ps --format json 2>/dev/null)"

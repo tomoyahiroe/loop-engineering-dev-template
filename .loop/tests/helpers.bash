@@ -21,6 +21,13 @@ make_test_repo() {
   mkdir -p "$REPO_ROOT/loops/runs" "$REPO_ROOT/loops/mtg"
   printf '# STATE\n' > "$REPO_ROOT/loops/STATE.md"
   LOOP_DIR="$(make_loop_dir "$REPO_ROOT/.loop")"; export LOOP_DIR
+  # compose のプロジェクト名。健全な初期状態の一部として作る（無いと
+  # loop-doctor が「他のリポジトリのループと衝突する」と正しく NG を出し、
+  # doctor 以外を見たいテストまで巻き添えで落ちる）。
+  # 名前は実物の解決ロジックに決めさせる（ここで直書きするとズレる）
+  mkdir -p "$REPO_ROOT/docker"
+  LOOP_DIR="$LOOP_DIR" REPO_ROOT="$REPO_ROOT" \
+    "$LOOP_REAL_DIR/bin/compose-env" >/dev/null 2>&1 || true
   git -C "$REPO_ROOT" init -q -b main
   git -C "$REPO_ROOT" config user.email t@example.com
   git -C "$REPO_ROOT" config user.name t

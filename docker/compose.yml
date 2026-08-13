@@ -46,5 +46,19 @@ services:
     restart: unless-stopped
 
 volumes:
+  # name: を明示して、compose のプロジェクト名を接頭辞に付けさせない。
+  #
+  # 既定では docker_loop-claude-auth のようにプロジェクト名が前に付く。
+  # すると .loop/config.toml の [docker] project_name を変えた瞬間に別の
+  # volume を指すことになり、**claude と gh の認証が消えて再ログインになる**。
+  # 認証はブラウザでの手作業が要る唯一の工程なので、プロジェクト名の変更で
+  # 失われてはいけない。
+  #
+  # 結果としてホスト上の全ループが同じ認証を共有する。このテンプレートは
+  # 個人が単独で所有するリポジトリ専用（loops/DECISIONS.md 2026-08-10）で、
+  # どのループも同じ GitHub アカウントと Claude サブスクリプションを使うため、
+  # 共有がむしろ正しい（1 回ログインすれば全ループに効く）。
   loop-claude-auth:
+    name: loop-claude-auth
   loop-gh-auth:
+    name: loop-gh-auth

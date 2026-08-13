@@ -46,6 +46,32 @@ record_event() {
     --kind "$kind" "${args[@]+"${args[@]}"}" 2>/dev/null || true
 }
 
+# compose のプロジェクト名を決める。
+# config の [docker] project_name を優先し、空ならリポジトリのディレクトリ名。
+# compose に使える文字（小文字英数・_・-）へ正規化する。
+#
+# 判定を 1 か所に置くのは、compose-env（書く側）と loop-doctor（照合する側）が
+# 別々に解釈すると、ズレていないのに NG と言われる類の事故になるため
+compose_project_name() {
+  local name
+  name="$(cfg docker.project_name 2>/dev/null || true)"
+  [ -n "$name" ] || name="$(basename "$REPO_ROOT")"
+  # 先頭は英数字でなければならない。それ以外は - に潰し、連続を 1 つにまとめる
+  name="$(printf '%s' "$name" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -e 's/[^a-z0-9_-]/-/g' -e 's/-\{2,\}/-/g' -e 's/^[^a-z0-9]*//' -e 's/[^a-z0-9]*$//')"
+  # 非 ASCII だけのディレクトリ名（例: 日本語）は正規化で空になる。ここで
+  # 固定文字列に落とすと、別々のリポジトリが同じ名前になって衝突を防げない
+  # ——この関数の存在理由そのものが崩れる。パスから一意な値を作る
+  if [ -z "$name" ]; then
+    name="loop-$(printf '%s' "$REPO_ROOT" | node -e '
+let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+  process.stdout.write(require("crypto").createHash("sha256")
+    .update(s).digest("hex").slice(0, 8));})')"
+  fi
+  printf '%s' "$name"
+}
+
 # 一過性エラー（DNS/接続系）の判定。$1 = 実行ログのパス
 is_transient_error() {
   [ -f "$1" ] || return 1

@@ -59,3 +59,39 @@ teardown() { cleanup_test_repo; rm -rf "$TMP"; }
   [ "$status" -eq 0 ]
   [ "$output" = "600" ]
 }
+
+# --- compose プロジェクト名 -------------------------------------------------
+# docker/compose.yml が docker/ 配下にあるため、compose の既定のプロジェクト名は
+# どのリポジトリでも "docker" になる。複数のループが互いのコンテナを奪い合う
+
+@test "compose_project_name は config 未設定ならディレクトリ名を使う" {
+  run compose_project_name
+  [ "$output" = "repo" ]   # make_test_repo は $TMP/repo を作る
+}
+
+@test "compose_project_name は config の指定を優先する" {
+  printf '[docker]\nproject_name = "my-loop"\n' > "$LOOP_DIR/config.toml"
+  run compose_project_name
+  [ "$output" = "my-loop" ]
+}
+
+@test "compose に使えない文字を正規化する" {
+  printf '[docker]\nproject_name = "My Repo!!"\n' > "$LOOP_DIR/config.toml"
+  run compose_project_name
+  [ "$output" = "my-repo" ]
+}
+
+@test "正規化で空になっても一意な名前を返す（衝突を防ぐのが目的のため）" {
+  # 非 ASCII だけの名前。固定文字列に落とすと別リポジトリと衝突してしまう
+  printf '[docker]\nproject_name = "日本語だけ"\n' > "$LOOP_DIR/config.toml"
+  run compose_project_name
+  [[ "$output" =~ ^loop-[0-9a-f]{8}$ ]]
+}
+
+@test "同じ名前でもリポジトリのパスが違えば別の名前になる" {
+  printf '[docker]\nproject_name = "です"\n' > "$LOOP_DIR/config.toml"
+  local a b
+  a="$(compose_project_name)"
+  REPO_ROOT="$TMP/other" b="$(compose_project_name)"
+  [ "$a" != "$b" ]
+}
