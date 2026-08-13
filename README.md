@@ -121,6 +121,17 @@ docker compose -f docker/compose.yml up -d --build loop
 は **seeded** なので触りません。あなたが書いた設定はそのまま残り、新しく
 増えた設定キーは `defaults.toml` 側から自動的に効きます。
 
+**`.gitignore` は自分で追従してください。** `.gitignore` はユーザー所有
+（`[U]`）なので上書きされません。テンプレート側で新しい除外が増えたときは、
+自分のプロジェクトの `.gitignore` に手で足す必要があります。足し忘れると、
+ハーネスが吐く運用ファイルが未追跡のまま溜まり、やがて Maker の PR に
+無関係な差分として混入します。テンプレート側の `.gitignore` と見比べて
+ください:
+
+```bash
+diff <(sort .gitignore) <(sort "$D/.gitignore")
+```
+
 **`--build` を忘れないでください。** `docker/entrypoint.sh` は Dockerfile の
 `COPY` でイメージに焼き込まれるため、ホスト側のファイルを差し替えただけでは
 コンテナに反映されません。`--force-recreate` は既存イメージからコンテナを
