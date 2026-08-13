@@ -70,6 +70,35 @@ export function safeJoin(baseDir, name) {
   return full;
 }
 
+// どのリポジトリのループを見ているかを名乗る。
+//
+// これは飾りではない。docker/compose.yml が docker/ 配下にあるため compose の
+// プロジェクト名がどのリポジトリでも "docker" になり、複数のループを同じ
+// ホストで動かすと互いのコンテナとポート（既定 7717）を奪い合う。名乗りが
+// ないと、別リポジトリのダッシュボードを自分のものだと思って見てしまう。
+//
+// origin の URL から owner/repo を取り出す。URL の形は
+//   https://github.com/owner/repo.git
+//   git@github.com:owner/repo.git
+//   ssh://git@github.com/owner/repo
+// remote が無い（未設定・ローカルのみ）場合はディレクトリ名で代替する
+export function parseRepoName(remoteUrl, repoRoot = '') {
+  const url = String(remoteUrl ?? '').trim();
+  const fallback = String(repoRoot).replace(/\/+$/, '').split('/').pop() || null;
+
+  if (!url) return { name: fallback, owner: null, url: null };
+
+  const m = url.match(/[:/]([^/:]+)\/([^/]+?)(?:\.git)?\/*$/);
+  if (!m) return { name: fallback, owner: null, url: null };
+
+  const [, owner, repo] = m;
+  return {
+    name: repo,
+    owner,
+    url: url.startsWith('http') ? url.replace(/\.git$/, '') : `https://github.com/${owner}/${repo}`,
+  };
+}
+
 const pad2 = (n) => String(n).padStart(2, '0');
 
 // firing の $DATE と同じ「ローカルの今日」。

@@ -244,6 +244,43 @@ code() { curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "$@"; }
   [ "$output" = "404" ]
 }
 
+@test "どのリポジトリを見ているかを名乗る" {
+  # compose のプロジェクト名がどのリポジトリでも "docker" になるため、同じ
+  # ホストで複数のループを動かすとコンテナとポートを奪い合う。名乗りが
+  # ないと、別リポジトリの画面を自分のものだと思って見てしまう
+  git -C "$REPO_ROOT" remote add origin https://github.com/someone/my-project.git
+  start_server
+  run get /api/status
+  [[ "$output" == *'"name":"my-project"'* ]]
+  [[ "$output" == *'"owner":"someone"'* ]]
+  [[ "$output" == *"\"repo_path\":\"$REPO_ROOT\""* ]]
+}
+
+@test "remote が無くてもディレクトリ名で名乗る" {
+  start_server
+  run get /api/status
+  # make_test_repo は $TMP/repo を作る
+  [[ "$output" == *'"name":"repo"'* ]]
+  [[ "$output" == *'"owner":null'* ]]
+}
+
+@test "SSH 形式の remote からも owner/repo を取れる" {
+  run node -e '
+    import(process.argv[1]).then((m) => {
+      const cases = [
+        "git@github.com:owner/repo.git",
+        "https://github.com/owner/repo.git",
+        "ssh://git@github.com/owner/repo",
+        "https://github.com/owner/repo",
+      ];
+      process.stdout.write(cases.map((c) => {
+        const r = m.parseRepoName(c, "/x/fallback");
+        return `${r.owner}/${r.name}`;
+      }).join(" "));
+    })' "$LOOP_REAL_DIR/lib/control-plane.mjs"
+  [ "$output" = "owner/repo owner/repo owner/repo owner/repo" ]
+}
+
 @test "本日 dispatch の数え方が firing の N_TODAY と一致する" {
   # P1 で /loop-status が起こしたのと同じ事故を、今度は API 側で起こさない
   # ための照合。firing は .retry.md を除外して数えるので、除外しない実装に

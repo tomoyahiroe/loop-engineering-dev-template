@@ -46,7 +46,12 @@ header {
   margin-bottom: 1.25rem;
 }
 
-h1 { font-size: 1.1rem; margin: 0; letter-spacing: .02em; }
+.ident { min-width: 0; }
+h1 { font-size: 1.1rem; margin: 0; letter-spacing: .02em;
+     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ident-sub { font-size: .72rem; color: var(--muted); margin-top: .1rem;
+             overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+             direction: rtl; text-align: left; }
 h2 { font-size: .8rem; margin: 2rem 0 .6rem; color: var(--muted); font-weight: 600;
      text-transform: uppercase; letter-spacing: .08em; }
 

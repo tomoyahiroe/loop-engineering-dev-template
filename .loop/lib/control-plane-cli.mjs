@@ -20,7 +20,7 @@ import { loadConfig, getKey } from './config.mjs';
 import {
   parseCrontabHours, nextFiring, parseBudget,
   safeJoin, classifyIssues, summarizePrs,
-  localDate, countDispatchedToday,
+  localDate, countDispatchedToday, parseRepoName,
 } from './control-plane.mjs';
 import { tail } from './events.mjs';
 
@@ -123,6 +123,16 @@ const listPrs = () => ghJson(['pr', 'list', '--state', 'open',
 
 // --- エンドポイント ---------------------------------------------------------
 
+// どのリポジトリを見ているかは変わらないので、プロセス内で 1 回だけ解決する
+let repoPromise = null;
+const getRepo = () => {
+  if (!repoPromise) {
+    repoPromise = run('git', ['remote', 'get-url', 'origin'])
+      .then((r) => parseRepoName(r.failed ? '' : r.stdout, REPO_ROOT));
+  }
+  return repoPromise;
+};
+
 async function apiStatus() {
   const errors = [];
 
@@ -155,6 +165,8 @@ async function apiStatus() {
   }
 
   return {
+    repo: await getRepo(),
+    repo_path: REPO_ROOT,
     maturity: getKey(cfg, 'maturity') ?? null,
     budget: {
       used: budget.used,

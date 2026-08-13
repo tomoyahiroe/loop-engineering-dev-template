@@ -98,6 +98,17 @@ function showErrors(list) {
 
 // --- サマリ -----------------------------------------------------------------
 
+function renderRepo(repo, path) {
+  const h = $('repo');
+  const name = repo?.name ?? '(リポジトリ不明)';
+  // owner/repo が取れていれば GitHub へのリンクにする
+  h.replaceChildren(repo?.url ? link(repo.url, name) : document.createTextNode(name));
+  $('repo-path').textContent = repo?.owner ? `${repo.owner} · ${path ?? ''}` : (path ?? '');
+  // 同じホストで複数のループを開いたとき、タブで見分けられるようにする
+  const title = `${name} — dev-loop`;
+  if (document.title !== title) document.title = title;
+}
+
 function renderStatus(s) {
   const b = s.budget ?? {};
   const bar = $('budget-bar');
@@ -239,6 +250,7 @@ async function refresh() {
       getJson('/api/issues'),
     ]);
 
+    renderRepo(status.repo, status.repo_path);
     renderStatus(status);
     renderEvents(events.events);
     renderIssues(issues);

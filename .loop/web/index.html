@@ -9,7 +9,13 @@
 <body>
 <!-- 観測専用。状態を変えるボタンは置かない（サーバも GET しか受け付けない） -->
 <header>
-  <h1>dev-loop</h1>
+  <div class="ident">
+    <!-- どのリポジトリを見ているかを必ず名乗る。同じホストで複数のループを
+         動かすとポートとコンテナ名が衝突しうるため、名乗りがないと別の
+         リポジトリの画面を自分のものだと思って見てしまう -->
+    <h1 id="repo">読み込み中…</h1>
+    <div id="repo-path" class="ident-sub"></div>
+  </div>
   <div id="conn" class="conn" data-state="loading">接続中…</div>
 </header>
 
