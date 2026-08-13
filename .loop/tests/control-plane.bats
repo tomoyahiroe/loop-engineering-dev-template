@@ -244,6 +244,36 @@ code() { curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "$@"; }
   [ "$output" = "404" ]
 }
 
+@test "画面の kind 表示名が events.mjs の KINDS を網羅している" {
+  # 網羅が崩れても画面は生の kind を出すだけで壊れないが、
+  # 日本語の表示名が付かないまま気づかれない状態が続く。
+  # 値域を増やしたら画面も更新する、を機械的に守る
+  local known ui missing
+  known="$(node -e 'import(process.argv[1]).then(m=>console.log(m.KINDS.join("\n")))' \
+           "$LOOP_REAL_DIR/lib/events.mjs" | sort -u)"
+  [ -n "$known" ] || { echo "KINDS を取り出せない"; false; }
+
+  # KIND_LABEL のキーだけを抜く（值はここでは見ない）
+  ui="$(sed -n '/^const KIND_LABEL = {/,/^};/p' "$LOOP_REAL_DIR/web/app.js" \
+        | grep -oE '^  [a-z_]+:' | tr -d ' :' | sort -u)"
+  [ -n "$ui" ] || { echo "app.js から KIND_LABEL のキーを抽出できない"; false; }
+
+  missing="$(comm -23 <(echo "$known") <(echo "$ui"))"
+  [ -z "$missing" ] || { echo "画面に表示名がない kind: $missing"; false; }
+}
+
+@test "画面が読む API のパスがすべてサーバに実在する" {
+  local used p
+  used="$(grep -oE "getJson\('/api/[a-z]+" "$LOOP_REAL_DIR/web/app.js" \
+          | sed "s/getJson('//" | sort -u)"
+  [ -n "$used" ] || { echo "app.js から API パスを抽出できない"; false; }
+  while read -r p; do
+    [ -n "$p" ] || continue
+    grep -q "p === '$p'" "$LOOP_REAL_DIR/lib/control-plane-cli.mjs" \
+      || { echo "app.js が叩く $p がサーバに無い"; false; }
+  done <<< "$used"
+}
+
 @test "静的ファイルを配信する" {
   # web/ はコードの所在から引く（テンプレート所有のため）。fixture 側には
   # 置かないので、中身ではなく配信できていることを見る

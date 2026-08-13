@@ -1,13 +1,60 @@
 <!doctype html>
+<html lang="ja">
+<head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>dev-loop control plane</title>
-<h1>dev-loop control plane</h1>
-<p>
-  API は動いています。画面はまだありません（P3 の Task 4 で実装します）。
-  今は次のエンドポイントを直接叩いて確認できます。
-</p>
-<ul>
-  <li><a href="/api/status">/api/status</a></li>
-  <li><a href="/api/events">/api/events</a></li>
-  <li><a href="/api/issues">/api/issues</a></li>
-</ul>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<!-- 観測専用。状態を変えるボタンは置かない（サーバも GET しか受け付けない） -->
+<header>
+  <h1>dev-loop</h1>
+  <div id="conn" class="conn" data-state="loading">接続中…</div>
+</header>
+
+<div id="errors" class="errors" hidden></div>
+
+<section class="summary">
+  <div class="card">
+    <div class="card-label">今日のトークン</div>
+    <div class="meter"><div id="budget-bar" class="meter-fill"></div></div>
+    <div id="budget-text" class="card-value">—</div>
+    <div id="budget-reason" class="card-note" hidden></div>
+  </div>
+  <div class="card">
+    <div class="card-label">maturity</div>
+    <div id="maturity" class="card-value">—</div>
+    <div id="maturity-note" class="card-note"></div>
+  </div>
+  <div class="card">
+    <div class="card-label">open PR</div>
+    <div id="prs" class="card-value">—</div>
+    <div id="dispatched" class="card-note"></div>
+  </div>
+  <div class="card">
+    <div class="card-label">次の firing</div>
+    <div id="next-firing" class="card-value">—</div>
+    <div id="firing-note" class="card-note"></div>
+  </div>
+</section>
+
+<section>
+  <h2>成否履歴</h2>
+  <div id="events" class="rows"><p class="empty">読み込み中…</p></div>
+</section>
+
+<section>
+  <h2>Issues</h2>
+  <div id="issues" class="rows"><p class="empty">読み込み中…</p></div>
+</section>
+
+<section>
+  <h2>open PR</h2>
+  <div id="prlist" class="rows"><p class="empty">読み込み中…</p></div>
+</section>
+
+<footer id="footer">—</footer>
+<script src="/app.js"></script>
+</body>
+</html>
