@@ -61,41 +61,24 @@ skill_files() {
   [ -z "$BAD" ] || { echo "gitignore されているのにスキルが参照:$BAD"; false; }
 }
 
-@test "スキルが数える dispatch 数の式が firing の N_TODAY と一致する" {
+@test "スキルが dispatch 数を自分で集計していない" {
   # P1 で実際にズレた箇所。firing は .retry.md を除外するが、
-  # /loop-status がそれを数えていた（3 対 2 の食い違い）。
+  # /loop-status がそれを数えていた（3 対 2 の食い違い）。213 件のテストが
+  # 1 件も捕まえられなかった。散文の集計式はテストできないため、集計は
+  # コントロールプレーンの実装に一本化した（設計書 2026-08-12 の決定 7）。
   #
-  # firing 側から「.retry.md を除外する grep -v の式」を実際に取り出し、
-  # スキル側の式にそれが（空白・引用符の違いを無視して）含まれているかを
-  # 突き合わせる。「retry という文字列を含むか」のような弱い判定にすると、
-  # grep -v ではなく grep（除外ではなく抽出）でも「retry を含む」という
-  # 理由で誤って一致したことにされてしまう
-  FIRING_LINE="$(grep -E 'N_TODAY=' "$REPO/.loop/bin/firing" | head -1)"
-  [ -n "$FIRING_LINE" ] || { echo "firing に N_TODAY の代入行が見つからない"; false; }
-  FIRING_GREP="$(printf '%s' "$FIRING_LINE" | grep -oE "grep -v '[^']*'" | head -1)"
-  [ -n "$FIRING_GREP" ] || { echo "firing の N_TODAY 行から grep -v の式を取り出せない"; false; }
-  FIRING_NORM="$(printf '%s' "$FIRING_GREP" | tr -d '[:space:]' | tr -d "'\"")"
-
-  # スキル側で「maker の dispatch ログを loops/runs から数えて wc -l する」
-  # 記述を広く拾う。ls / find など表現を書き換えても抽出網から漏れないよう、
-  # わざと緩いネットにしてある。狭いネットだと、書き換えただけで対象行が
-  # 一件も見つからず while の本体が一度も走らず、検査そのものが空回りして
-  # 常に合格してしまう（実際にそうなっていた）
-  CANDIDATES="$(skill_files | xargs grep -h 'loops/runs' 2>/dev/null \
-    | grep 'maker' | grep -E 'wc[[:space:]]*-l' || true)"
-  [ -n "$CANDIDATES" ] || { echo "集計式が見つからない。/loop-status から集計をなくしたなら、このテストも更新すること"; false; }
-
-  BAD=""
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    NORM_LINE="$(printf '%s' "$line" | tr -d '[:space:]' | tr -d "'\"")"
-    case "$NORM_LINE" in
-      *"$FIRING_NORM"*) : ;;
-      *) BAD="$BAD"$'\n'"$line" ;;
-    esac
-  done <<< "$CANDIDATES"
-
-  [ -z "$BAD" ] || { echo "firing の retry 除外 [$FIRING_GREP] と一致しない集計式:$BAD"; false; }
+  # 以前はここで「スキルの式が firing の式と一致するか」を照合していたが、
+  # 集計そのものをスキルから無くしたので、規則を「書き戻さないこと」に
+  # 反転させる。firing と API 側の一致は control-plane.bats が実データで見る
+  local offenders
+  offenders="$(skill_files | xargs grep -l 'loops/runs' 2>/dev/null \
+    | xargs grep -l 'maker' 2>/dev/null \
+    | xargs grep -lE 'wc[[:space:]]*-l' 2>/dev/null || true)"
+  [ -z "$offenders" ] || {
+    echo "スキルが dispatch 数を自分で数えている: $offenders"
+    echo "集計は .loop/lib/control-plane.mjs の countDispatchedToday に一本化すること"
+    false
+  }
 }
 
 @test "プロンプトが指示する gh コマンドが、その role の許可リストに含まれている" {
