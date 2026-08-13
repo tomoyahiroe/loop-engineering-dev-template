@@ -112,3 +112,34 @@ skill_files() {
   done
   [ -z "$BAD" ] || { echo "許可リスト外のコマンドを指示:$BAD"; false; }
 }
+
+# --- entrypoint（散文ではないが、同じ「参照先が実在するか」の照合） --------
+
+@test "entrypoint が起動するコマンドが実在し、実行可能である" {
+  # entrypoint.sh は bats から直接動かせない（コンテナ前提）ため、
+  # 参照している実行ファイルが実在することだけでも機械的に守る。
+  # ここがズレると、コンテナを起動して初めて気づくことになる
+  local refs r
+  refs="$(grep -oE '\$LOOP_DIR/bin/[a-z-]+' "$REPO/docker/entrypoint.sh" \
+          | sed 's|\$LOOP_DIR/bin/||' | sort -u)"
+  [ -n "$refs" ] || { echo "entrypoint.sh から \$LOOP_DIR/bin の参照を抽出できない"; false; }
+
+  while IFS= read -r r; do
+    [ -n "$r" ] || continue
+    [ -x "$REPO/.loop/bin/$r" ] \
+      || { echo "entrypoint.sh が参照する .loop/bin/$r が無いか実行可能でない"; false; }
+  done <<< "$refs"
+}
+
+@test "entrypoint が読む loop-config のキーが defaults.toml に存在する" {
+  local keys k
+  keys="$(grep -oE 'loop-config" get [a-z_.]+' "$REPO/docker/entrypoint.sh" \
+          | sed 's/.*get //' | sort -u)"
+  [ -n "$keys" ] || { echo "entrypoint.sh から loop-config のキーを抽出できない"; false; }
+
+  while IFS= read -r k; do
+    [ -n "$k" ] || continue
+    run "$REPO/.loop/bin/loop-config" get "$k"
+    [ "$status" -eq 0 ] || { echo "entrypoint.sh が読む $k が設定に無い"; false; }
+  done <<< "$keys"
+}

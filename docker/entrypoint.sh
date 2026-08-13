@@ -94,4 +94,22 @@ fi
 echo "生成した crontab:"
 cat "$CRONTAB"
 
+# コントロールプレーン（観測 UI）を同居させる。service は増やさない。
+#
+# ここでの失敗は cron を止めない。UI は観測手段であって、ループ本体の
+# 動作条件ではない。逆に UI が落ちてもループは回り続ける必要がある。
+#
+# -x の確認を挟むのは、entrypoint.sh だけ新しくて .loop/bin/control-plane が
+# まだ無い派生プロジェクトでも起動できるようにするため。テンプレート同期
+# （P5）が未実装の間は、この組み合わせが実際に起こり得る。
+if [ -x "$LOOP_DIR/bin/control-plane" ]; then
+  UI_PORT="$("$LOOP_DIR/bin/loop-config" get ui.port 2>/dev/null || echo 7717)"
+  # 出力はコンテナの stdout に流す。docker logs を 1 か所見れば
+  # cron と UI の両方が分かる（起動行とエラーしか出さないので埋もれない）
+  "$LOOP_DIR/bin/control-plane" &
+  echo "コントロールプレーン: http://127.0.0.1:${UI_PORT}"
+else
+  echo "注意: $LOOP_DIR/bin/control-plane が無いため観測 UI なしで続行します" >&2
+fi
+
 exec supercronic -passthrough-logs "$CRONTAB"
