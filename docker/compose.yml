@@ -42,6 +42,14 @@ services:
     environment:
       - REPO_ROOT=${PWD}
       - TZ=${LOOP_TZ:-Asia/Tokyo}
+      # Claude Code の設定ホームを、認証を入れている volume の中に向ける。
+      #
+      # 既定では認証などは ~/.claude（= volume の中）に入るが、~/.claude.json
+      # だけが 1 階層上に置かれ、volume の外＝コンテナの書き込みレイヤに残る。
+      # そのためコンテナを作り直すたびに消え、Maker/Verifier の実行ログの
+      # 先頭に「Claude configuration file not found」が毎回混ざる。
+      # ここを揃えると .claude.json も volume に入り、作り直しても残る。
+      - CLAUDE_CONFIG_DIR=/root/.claude
     network_mode: host
     restart: unless-stopped
 

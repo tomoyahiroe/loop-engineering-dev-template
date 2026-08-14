@@ -133,3 +133,17 @@ skill_files() {
   run grep -c "compose-env" "$REPO/.claude/skills/loop-setup/SKILL.md"
   [ "$output" -ge 1 ]
 }
+
+@test "compose が Claude の設定ホームを認証 volume の中に向けている" {
+  # 既定では ~/.claude.json だけが volume の外に残り、コンテナを作り直す
+  # たびに消える。Maker/Verifier の実行ログに毎回ノイズが混ざる
+  local mountpoint
+  mountpoint="$(grep -oE 'loop-claude-auth:[^ ]+' "$REPO/docker/compose.yml" | head -1 | cut -d: -f2)"
+  [ -n "$mountpoint" ] || { echo "compose.yml から認証 volume のマウント先を取れない"; false; }
+
+  run grep -c "CLAUDE_CONFIG_DIR=$mountpoint" "$REPO/docker/compose.yml"
+  [ "$output" -eq 1 ] || {
+    echo "CLAUDE_CONFIG_DIR が認証 volume のマウント先 ($mountpoint) を指していない"
+    false
+  }
+}

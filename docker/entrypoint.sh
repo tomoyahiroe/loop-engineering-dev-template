@@ -90,6 +90,18 @@ if ! SMOKE_OUT="$("$LOOP_DIR/bin/loop-config" get maturity 2>&1)"; then
     "docker compose up -d --force-recreate loop で入れ直してください"
 fi
 
+# CLAUDE_CONFIG_DIR を volume の中に向ける前から動いている環境のための移行。
+# 旧レイアウトでは ~/.claude.json だけが volume の外にあり、コンテナを
+# 作り直すと消えていた。まだ移していなければ 1 回だけ引き継ぐ。
+# 上書きはしない（新しい側が正）
+if [ -n "${CLAUDE_CONFIG_DIR:-}" ] && [ -f /root/.claude.json ] \
+   && [ ! -f "$CLAUDE_CONFIG_DIR/.claude.json" ]; then
+  mkdir -p "$CLAUDE_CONFIG_DIR"
+  if cp /root/.claude.json "$CLAUDE_CONFIG_DIR/.claude.json" 2>/dev/null; then
+    echo "Claude の設定を $CLAUDE_CONFIG_DIR/.claude.json へ引き継ぎました"
+  fi
+fi
+
 "$LOOP_DIR/bin/gen-crontab" > "$CRONTAB"
 echo "生成した crontab:"
 cat "$CRONTAB"
