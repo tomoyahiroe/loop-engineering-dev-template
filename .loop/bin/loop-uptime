@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Loop の稼働集計。いつ・何回・どれだけの時間動いていたかを表にする。
+# **完全に読み取り専用。** 用法は --help を見る。
+set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
+exec node "$LIB_DIR/uptime-cli.mjs" "$@"
