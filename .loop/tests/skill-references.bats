@@ -126,3 +126,10 @@ skill_files() {
     [ "$status" -eq 0 ] || { echo "entrypoint.sh が読む $k が設定に無い"; false; }
   done <<< "$keys"
 }
+
+@test "loop-setup が compose のプロジェクト名を決める手順を含む" {
+  # 抜けていると、セットアップ直後の /loop-doctor がいきなり NG を出す。
+  # さらに 2 つ目のループを立てたときに互いのコンテナを奪い合う
+  run grep -c "compose-env" "$REPO/.claude/skills/loop-setup/SKILL.md"
+  [ "$output" -ge 1 ]
+}

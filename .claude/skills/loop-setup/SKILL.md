@@ -158,6 +158,15 @@ gh label create loop:auto-merge --color 1D76DB --description "L3 で自動 merge
 
 ## ⑧ ビルドと起動
 
+**先に compose のプロジェクト名を決める。** これをやらないと、compose の
+プロジェクト名がどのリポジトリでも `docker` になり、同じホストで 2 つ目の
+ループを起動したときに**互いのコンテナを奪い合う**（後から起動したほうが、
+先に動いていたコンテナを別リポジトリ向けに作り直す）。
+
+```bash
+.loop/bin/compose-env
+```
+
 **必ずリポジトリのルートから実行する。** `docker/compose.yml` は `${PWD}` で
 ホストと同じ絶対パスにマウントするため、`docker/` の中から叩くとマウント先がズレる。
 
