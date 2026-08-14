@@ -147,3 +147,31 @@ skill_files() {
     false
   }
 }
+
+@test "README の更新手順が seeded なファイルをコピーしていない" {
+  # seeded = ユーザーのもの。同期で触ってはいけない。散文の手順がここを
+  # 踏むと、ユーザーが書いた設定や文書が黙って上書きされる。
+  # 2026-08-14 に README.md 自身がこの誤りで template 側に入っていた
+  local seeded p section
+  seeded="$(node -e '
+    const fs = require("fs");
+    const { parse } = require("smol-toml");
+    const o = parse(fs.readFileSync(process.argv[1], "utf8"));
+    const r = (o.rules || []).find((x) => x.kind === "seeded");
+    process.stdout.write((r ? r.paths : []).join("\n"));
+  ' "$REPO/.loop/OWNERSHIP.toml")"
+  [ -n "$seeded" ] || { echo "OWNERSHIP.toml から seeded のパスを取れない"; false; }
+
+  # 「導入済みのプロジェクトでハーネスを更新する」節だけを対象にする
+  section="$(sed -n '/^## 導入済みのプロジェクトでハーネスを更新する/,/^## /p' "$REPO/README.md")"
+  [ -n "$section" ] || { echo "README に更新手順の節が見つからない"; false; }
+
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    # cp の行にそのパスが現れていないこと（説明文中の言及は対象外）
+    if printf '%s' "$section" | grep -E '^\s*(cp|\[ -e)' | grep -qF "$p"; then
+      echo "更新手順が seeded な $p をコピーしている"
+      false
+    fi
+  done <<< "$seeded"
+}

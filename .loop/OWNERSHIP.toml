@@ -10,6 +10,11 @@ paths = [
   ".loop/config.toml",
   "docker/Dockerfile",
   "CLAUDE.md",
+  # README.md は派生プロジェクト自身の説明になる。テンプレート所有にすると、
+  # プロジェクトの README を書いた瞬間に同期がテンプレートの説明文で
+  # 上書きして消す。CLAUDE.md と同じ「プロジェクト固有の文書」なので同じ扱い。
+  # 2026-08-14 に template から移動（loops/DECISIONS.md 参照）
+  "README.md",
   ".claude/settings.json",
 ]
 
@@ -20,7 +25,6 @@ paths = [
   ".claude/skills/**",
   "docker/compose.yml",
   "docker/entrypoint.sh",
-  "README.md",
 ]
 
 [[rules]]
