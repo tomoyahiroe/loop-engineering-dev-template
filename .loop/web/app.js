@@ -12,6 +12,10 @@ const $ = (id) => document.getElementById(id);
 // ここが実装とズレると画面だけが古くなるので、知らない kind は
 // そのまま生の値を出す（黙って握りつぶさない）
 const KIND_LABEL = {
+  // start / finish は稼働時間の集計用で、1 tick ごとに必ず出る。
+  // 履歴に並べると判断イベントが埋もれるので、既定では隠す（§renderEvents）
+  start: ['開始', '', ''],
+  finish: ['終了', '', ''],
   idle: ['待ち', '', 'ready な Issue なし'],
   report: ['報告のみ', '', 'L1 のため dispatch しない'],
   dispatch: ['dispatch', 'good', ''],
@@ -181,14 +185,20 @@ function eventRow(e) {
   return row;
 }
 
+// 履歴に出さない kind。start / finish は 1 tick ごとに必ず出るため、並べると
+// 1 発火が 3 行になって「何が起きたか」の判断イベントが埋もれる。
+// これらは稼働時間の集計（.loop/bin/loop-uptime）が読むためのもの
+const HIDDEN_KINDS = new Set(['start', 'finish']);
+
 function renderEvents(events) {
   const box = $('events');
-  if (!events || events.length === 0) {
+  const shown = (events ?? []).filter((e) => !HIDDEN_KINDS.has(e.kind));
+  if (shown.length === 0) {
     replace(box, [el('p', 'empty',
       'まだ記録がありません。次の firing で最初の行が入ります')]);
     return;
   }
-  replace(box, events.map(eventRow));
+  replace(box, shown.map(eventRow));
 }
 
 // --- Issues / PR ------------------------------------------------------------

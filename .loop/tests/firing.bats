@@ -549,3 +549,64 @@ EOF
   run bash -c "grep -c '^issue comment 5 ' \"$GH_LOG\""
   [ "$output" -eq 1 ]
 }
+
+# --- tick の開始と終了（稼働時間の集計用） ---------------------------------
+
+@test "1 tick に start と finish が 1 行ずつ出る" {
+  GH_ISSUE_LIST_JSON='[]' run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 0 ]
+  run grep -c '"kind":"start"' "$REPO_ROOT/loops/events.jsonl"
+  [ "$output" -eq 1 ]
+  run grep -c '"kind":"finish"' "$REPO_ROOT/loops/events.jsonl"
+  [ "$output" -eq 1 ]
+}
+
+@test "finish が所要時間と終了コードと結末を持つ" {
+  GH_ISSUE_LIST_JSON='[]' run "$LOOP_REAL_DIR/bin/firing"
+  run grep '"kind":"finish"' "$REPO_ROOT/loops/events.jsonl"
+  [[ "$output" == *'"duration_ms":'* ]]
+  [[ "$output" == *'"rc":0'* ]]
+  # ready な Issue が無い tick なので結末は idle
+  [[ "$output" == *'"outcome":"idle"'* ]]
+  # start_ms は入力専用。出力に残ってはいけない
+  [[ "$output" != *'start_ms'* ]]
+}
+
+@test "start は判断イベントより前に書かれる" {
+  # gh を叩く前に書かないと、ネットワーク待ちのハングが記録に残らない
+  GH_ISSUE_LIST_JSON='[]' run "$LOOP_REAL_DIR/bin/firing"
+  run head -1 "$REPO_ROOT/loops/events.jsonl"
+  [[ "$output" == *'"kind":"start"'* ]]
+}
+
+@test "--dry-run では start も finish も書かない" {
+  GH_ISSUE_LIST_JSON='[]' run "$LOOP_REAL_DIR/bin/firing" --dry-run
+  [ "$status" -eq 0 ]
+  [ ! -f "$REPO_ROOT/loops/events.jsonl" ]
+}
+
+@test "firing が非 0 で終わる経路でも finish が残る" {
+  # 異常時に何分かかったかが一番知りたいデータなので、失敗経路こそ記録する。
+  # origin/main と競合させて conflict 経路（唯一の exit 1）を通す
+  local up="$TMP/origin.git" other="$TMP/other"
+  git init -q --bare -b main "$up"
+  git -C "$REPO_ROOT" remote add origin "$up"
+  git -C "$REPO_ROOT" push -q -u origin main
+  git clone -q -b main "$up" "$other"
+  git -C "$other" config user.email t@example.com
+  git -C "$other" config user.name t
+  echo theirs > "$other/a.txt"
+  git -C "$other" commit -qam theirs
+  git -C "$other" push -q origin main
+  echo ours > "$REPO_ROOT/a.txt"
+  git -C "$REPO_ROOT" commit -qam ours
+
+  # LOOP_SKIP_FETCH を外して実際に fetch/merge させる
+  GH_ISSUE_LIST_JSON='[]' LOOP_SKIP_FETCH=0 run "$LOOP_REAL_DIR/bin/firing"
+  [ "$status" -eq 1 ]
+
+  run grep '"kind":"finish"' "$REPO_ROOT/loops/events.jsonl"
+  [ -n "$output" ] || { echo "失敗経路で finish が記録されていない"; false; }
+  [[ "$output" == *'"rc":1'* ]]
+  [[ "$output" == *'"outcome":"conflict"'* ]]
+}

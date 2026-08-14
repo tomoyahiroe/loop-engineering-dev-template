@@ -44,7 +44,16 @@ record_event() {
   for kv in "$@"; do args+=(--field "$kv"); done
   REPO_ROOT="$REPO_ROOT" node "$LIB_DIR/events-cli.mjs" append \
     --kind "$kind" "${args[@]+"${args[@]}"}" 2>/dev/null || true
+  LOOP_LAST_KIND="$kind"
 }
+
+# 直近に記録した kind。firing の EXIT トラップが「この tick の結末」として使う。
+# 各呼び出し箇所に代入を書き足すと 11 か所ぶんの配線漏れを作るので、
+# record_event の中で一括して覚える
+LOOP_LAST_KIND=""
+
+# 現在時刻をミリ秒で返す。date +%s%3N は GNU 拡張で BSD date（macOS）に無い
+now_ms() { node -e 'process.stdout.write(String(Date.now()))'; }
 
 # compose のプロジェクト名を決める。
 # config の [docker] project_name を優先し、空ならリポジトリのディレクトリ名。

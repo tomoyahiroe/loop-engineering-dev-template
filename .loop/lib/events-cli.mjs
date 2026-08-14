@@ -66,6 +66,18 @@ if (cmd === 'append') {
     if (parsed) Object.assign(fields, parsed);
   }
 
+  // start_ms は入力専用。経過時間に変換して捨てる。
+  // 差を node 側で取るのは date +%s%3N が GNU 拡張で BSD date（macOS。
+  // bats はホストで走る）に無いため（stamp() と同じ理由）
+  if (fields.start_ms !== undefined) {
+    const started = Number(fields.start_ms);
+    delete fields.start_ms;
+    // 壊れた値で duration_ms を作らない（無いほうが「計測前」として扱える）
+    if (Number.isFinite(started) && started > 0) {
+      fields.duration_ms = Math.max(0, Date.now() - started);
+    }
+  }
+
   let line;
   try {
     line = buildLine(kind, fields);

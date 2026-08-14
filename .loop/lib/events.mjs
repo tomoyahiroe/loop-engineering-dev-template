@@ -10,6 +10,11 @@
 // kind の値域。firing の終了経路と 1 対 1 に対応する。
 // ここを増やしたら firing 側にも配線する（tests/events.bats が双方向に照合する）
 export const KINDS = [
+  // tick の開始と終了。稼働時間の集計（.loop/bin/loop-uptime）が読む。
+  // start は gh を叩く前に、finish は EXIT トラップで書く。start があるのに
+  // finish が無い tick は「ハングまたは強制終了」を意味する
+  'start',
+  'finish',
   'conflict',
   'automerge',
   'automerge_failed',
@@ -33,6 +38,8 @@ export const NUMERIC_FIELDS = [
   'max_prs',
   'today',
   'max_today',
+  'duration_ms',
+  'rc',
 ];
 
 // ISO 8601 をオフセット付きで作る。

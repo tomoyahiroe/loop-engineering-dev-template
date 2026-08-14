@@ -19,6 +19,38 @@ MATURITY="$(cfg maturity)"
 # JSON から値を取り出す小さなヘルパー（jq に依存しない）
 jnode() { node -e "$1"; }
 
+# --- tick の開始と終了を記録する -------------------------------------------
+# 稼働時間の集計（.loop/bin/loop-uptime）が読む。
+#
+# start は gh を叩く前に書く。ネットワーク待ちで固まった tick を「始まったが
+# 終わっていない」として検出できるようにするため。後ろに置くと、その区間の
+# ハングが記録に残らない。
+#
+# finish は EXIT トラップ 1 か所で書く。この下に終了経路が 11 か所あり、
+# 個別に書くと必ず漏れる。漏れた経路はそのまま「記録されない失敗」になり、
+# 一番知りたいデータ（異常時に何分かかったか）が欠ける。
+#
+# --dry-run では何も書かない。DRY は履歴を汚さない（record_state と同じ扱い）
+if [ "$DRY" = 0 ]; then
+  FIRING_START_MS="$(now_ms)"
+  record_event start
+  # start 自体は「この tick の結末」ではないので、覚えた kind を捨てる
+  LOOP_LAST_KIND=""
+
+  firing_finish() {
+    # rc はハンドラの先頭で捕まえる（後続のコマンドが $? を上書きするため）
+    local rc=$?
+    record_event finish \
+      "start_ms=$FIRING_START_MS" \
+      "rc=$rc" \
+      "outcome=${LOOP_LAST_KIND:-none}"
+    # 終了コードを変えない。観測のための記録がループ本体の判定を
+    # 書き換えてはいけない
+    return "$rc"
+  }
+  trap firing_finish EXIT
+fi
+
 # --- 0. origin/main 同期 ---------------------------------------------------
 if [ "$DRY" = 0 ] && [ "${LOOP_SKIP_FETCH:-0}" != "1" ]; then
   git fetch origin >/dev/null 2>&1 || true
